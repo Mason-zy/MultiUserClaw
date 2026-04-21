@@ -63,10 +63,15 @@ services:
       PLATFORM_HOSTED_VLLM_API_BASE: ${HOSTED_VLLM_API_BASE:-}
 
       PLATFORM_DEFAULT_MODEL: ${DEFAULT_MODEL:-dashscope/qwen3-coder-plus}
-      PLATFORM_OPENCLAW_IMAGE: openclaw:latest
+      PLATFORM_OPENCLAW_IMAGE: ${PLATFORM_OPENCLAW_IMAGE:-openclaw:latest}
+      PLATFORM_HERMES_IMAGE: ${PLATFORM_HERMES_IMAGE:-nanobot-hermes-agent:latest}
+      PLATFORM_DEDICATED_RUNTIME_BACKEND: ${PLATFORM_DEDICATED_RUNTIME_BACKEND:-hermes}
+      PLATFORM_DEDICATED_HERMES_URL: ${PLATFORM_DEDICATED_HERMES_URL:-}
       PLATFORM_CONTAINER_NETWORK: openclaw-internal
       PLATFORM_SHARED_OPENCLAW_ENABLED: ${PLATFORM_SHARED_OPENCLAW_ENABLED:-true}
-      PLATFORM_SHARED_OPENCLAW_URL: ${PLATFORM_SHARED_OPENCLAW_URL:-http://shared-openclaw:18080}
+      PLATFORM_SHARED_RUNTIME_BACKEND: ${PLATFORM_SHARED_RUNTIME_BACKEND:-hermes}
+      PLATFORM_SHARED_OPENCLAW_URL: ${PLATFORM_SHARED_OPENCLAW_URL:-http://shared-openclaw:8080}
+      PLATFORM_SHARED_HERMES_URL: ${PLATFORM_SHARED_HERMES_URL:-http://shared-openclaw:8080}
       PLATFORM_SHARED_OPENCLAW_SYSTEM_TOKEN: ${PLATFORM_SHARED_OPENCLAW_SYSTEM_TOKEN:-shared-openclaw-system-token}
       PLATFORM_CONTAINER_TZ: ${CONTAINER_TZ:-Asia/Shanghai}
       PLATFORM_CONTAINER_MEMORY_LIMIT: ${PLATFORM_CONTAINER_MEMORY_LIMIT:-2g}
@@ -97,16 +102,16 @@ services:
 
   shared-openclaw:
     container_name: openclaw-shared
-    image: openclaw:latest
-    command: ["node", "bridge/dist/bridge/start.js"]
+    image: hermes:latest
+    command: ["python", "-m", "gateway.run"]
     environment:
-      NANOBOT_PROXY__URL: http://gateway:8080/llm/v1
-      NANOBOT_PROXY__TOKEN: ${PLATFORM_SHARED_OPENCLAW_SYSTEM_TOKEN:-shared-openclaw-system-token}
-      NANOBOT_AGENTS__DEFAULTS__MODEL: ${DEFAULT_MODEL:-dashscope/qwen3-coder-plus}
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: 8080
+      API_SERVER_MODEL_NAME: ${DEFAULT_MODEL:-dashscope/qwen3-coder-plus}
       TZ: ${CONTAINER_TZ:-Asia/Shanghai}
-      BRIDGE_ENABLE_CHANNELS: "0"
     volumes:
-      - shared_openclaw_data:/root/.openclaw
+      - shared_openclaw_data:/opt/data
     networks:
       - openclaw-internal
     depends_on:

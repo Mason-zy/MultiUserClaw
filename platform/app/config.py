@@ -37,13 +37,27 @@ class Settings(BaseSettings):
     # Default model for new users
     default_model: str = "claude-sonnet-4-5"
 
-    # Docker
+    # Runtime backend selection
+    dedicated_runtime_backend: str = "hermes"
+    shared_runtime_backend: str = "openclaw"
+
+    # Dedicated runtime endpoints/images
     openclaw_image: str = "openclaw:latest"
+    hermes_image: str = "hermes-agent:latest"
+    dedicated_hermes_url: str = ""
+    dedicated_hermes_internal_port: int = 18080
+    dedicated_hermes_api_key: str = "dev-hermes-bridge-key"
+    dedicated_hermes_default_provider: str = "custom"
+    dedicated_hermes_default_base_url: str = "http://gateway:8080/llm/v1"
+    dedicated_hermes_default_api_key: str = "platform-proxy"
+    dedicated_runtime_container_name_prefix: str = "hermes-user"
+    dedicated_runtime_data_volume_prefix: str = "hermes-data"
     container_network: str = "openclaw-internal"
 
-    # Shared OpenClaw runtime，共享openclaw容器时的参数
+    # Shared runtime endpoints/tokens，共享 runtime 容器时的参数
     shared_openclaw_enabled: bool = True
     shared_openclaw_url: str = "http://shared-openclaw:18080"
+    shared_hermes_url: str = ""
     shared_openclaw_timeout_seconds: int = 120
     shared_openclaw_system_token: str = ""
     user_container_publish_ports: bool = True

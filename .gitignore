@@ -58,9 +58,12 @@ cache
 .parquet
 .claude
 .claude/settings.local.json
+.hermes
 docs
 openclaw/bridge-deploy-copy
 openclaw/dist-runtime
 simple_front/dist
 openclaw/packages/libsignal-node/
 phone_front/dist
+hermes-agent/deploy_copy
+openclaw

@@ -13,7 +13,8 @@ from app.config import settings
 from app.db.engine import engine
 from app.db.models import Base
 from app.logging_setup import setup_logging, log_settings_summary
-from app.routes import auth, llm, proxy, admin, shared_openclaw
+from app.api_compat import openclaw_compat
+from app.routes import admin, auth, llm, proxy
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -166,9 +167,8 @@ app.add_middleware(
 # Mount route groups
 app.include_router(auth.router)
 app.include_router(llm.router)
+app.include_router(openclaw_compat.router)
 app.include_router(proxy.router)
-# 对于共享openclaw的路由api注册
-app.include_router(shared_openclaw.router)
 app.include_router(admin.router)
 
 

@@ -48,7 +48,8 @@ async def container_info(
     if container is None:
         return {"container_name": None, "status": "none", "docker_id": None}
     short_id = user.id[:8]
-    container_name = f"openclaw-user-{short_id}"
+    prefix = (settings.dedicated_runtime_container_name_prefix or "openclaw-user").strip() or "openclaw-user"
+    container_name = f"{prefix}-{short_id}"
 
     # Get real Docker status and port mappings
     docker_status = container.status
@@ -77,6 +78,12 @@ async def container_info(
         "created_at": container.created_at.isoformat() if container.created_at else None,
         "ports": ports,
     }
+
+
+@router.get("/ping")
+async def proxy_ping(user: User = Depends(get_current_user)):
+    """Authenticated liveness probe for frontend service status checks."""
+    return {"message": "pong", "service": "openclaw-proxy", "user_id": user.id}
 
 
 def _sanitize_openclaw_config(config_json: str) -> tuple[str, list[str]]:
@@ -122,7 +129,8 @@ async def container_doctor_fix(
         raise HTTPException(status_code=404, detail="No container found")
 
     short_id = user.id[:8]
-    volume_name = f"openclaw-data-{short_id}"
+    volume_prefix = (settings.dedicated_runtime_data_volume_prefix or "openclaw-data").strip() or "openclaw-data"
+    volume_name = f"{volume_prefix}-{short_id}"
 
     try:
         client = docker.from_env()
@@ -228,54 +236,12 @@ async def container_doctor_fix(
 
 
 # ---------------------------------------------------------------------------
-# SSE event stream (must be before the catch-all route)
-# ---------------------------------------------------------------------------
-
-@router.get("/events/stream")
-async def proxy_events_stream(
-    request: Request,
-    token: str = "",
-):
-    """SSE proxy for chat events — auth via query param since EventSource can't set headers."""
-    from app.auth.service import decode_token, get_user_by_id
-    from fastapi.responses import StreamingResponse
-
-    # Authenticate via query param token
-    payload = decode_token(token)
-    if payload is None or payload.get("type") != "access":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
-    async with async_session() as db:
-        user = await get_user_by_id(db, payload["sub"])
-        if user is None or not user.is_active:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
-        base_url = await _container_url(db, user)
-
-    target_url = f"{base_url}/api/events/stream"
-
-    async def _stream_sse():
-        async with httpx.AsyncClient(timeout=None) as client:
-            try:
-                async with client.stream("GET", target_url) as resp:
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
-            except (httpx.ConnectError, httpx.RemoteProtocolError):
-                yield b"data: {\"error\":\"upstream disconnected\"}\n\n"
-
-    return StreamingResponse(
-        _stream_sse(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-# ---------------------------------------------------------------------------
 # File proxy (supports token as query param for <img> tags)
 # Covers both /filemanager/download and /filemanager/serve
 # ---------------------------------------------------------------------------
 
 async def _proxy_file_request(request: Request, token: str, bridge_path: str):
-    """Shared helper: authenticate via query-param or header, then proxy to bridge."""
+    """Shared helper: authenticate via query-param or header, then proxy to runtime."""
     from app.auth.service import decode_token, get_user_by_id
     from fastapi.responses import Response
 
@@ -300,9 +266,22 @@ async def _proxy_file_request(request: Request, token: str, bridge_path: str):
     async with async_session() as db:
         base_url = await _container_url(db, user)
 
-    target_url = f"{base_url}/api/{bridge_path}"
-    if request.query_params:
-        target_url += f"?{request.query_params}"
+    bridge_path = bridge_path.lstrip("/")
+    runtime_backend = (settings.dedicated_runtime_backend or "openclaw").strip().lower()
+    if runtime_backend == "hermes":
+        requested_path = request.query_params.get("path", "")
+        normalized_path = requested_path if requested_path.startswith("/") else f"/{requested_path}" if requested_path else ""
+        if bridge_path == "filemanager/serve" and normalized_path.startswith("/workspace/"):
+            target_url = f"{base_url}{normalized_path}"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Dedicated Hermes file proxy currently supports /workspace paths via filemanager/serve only",
+            )
+    else:
+        target_url = f"{base_url}/api/{bridge_path}"
+        if request.query_params:
+            target_url += f"?{request.query_params}"
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -414,8 +393,8 @@ async def proxy_websocket(
                 target_ws_url = target_ws_url.rstrip("/") + "/ws"
         else:
             container = await ensure_running(db, user.id)
-            # Connect to bridge WS relay (port 18080), not gateway directly
-            target_ws_url = f"ws://{container.internal_host}:18080/ws"
+            # Connect to the per-user runtime websocket relay when available.
+            target_ws_url = f"ws://{container.internal_host}:{container.internal_port}/ws"
     # DB session is now released — not held during long-lived WebSocket relay
 
     await websocket.accept()
@@ -496,7 +475,7 @@ async def proxy_terminal_websocket(
             target_ws_url = target_ws_url.rstrip("/") + "/api/terminal/ws"
         else:
             container = await ensure_running(db, user.id)
-            target_ws_url = f"ws://{container.internal_host}:18080/api/terminal/ws"
+            target_ws_url = f"ws://{container.internal_host}:{container.internal_port}/api/terminal/ws"
 
     await websocket.accept()
 

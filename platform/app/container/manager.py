@@ -1,12 +1,15 @@
-"""Docker container lifecycle management for per-user openclaw instances."""
+"""Docker container lifecycle management for per-user dedicated runtime instances."""
 
 from __future__ import annotations
 
 import io
+import json
 import secrets
 import tarfile
 import time
 from pathlib import Path
+
+import yaml
 
 import docker
 from docker.errors import APIError as DockerAPIError, NotFound as DockerNotFound
@@ -61,6 +64,176 @@ def _is_host_port_in_use(client: docker.DockerClient, host_port: int) -> bool:
                 if (binding.get("HostPort") or "") == port_str:
                     return True
     return False
+
+
+def _runtime_backend() -> str:
+    return (settings.dedicated_runtime_backend or "openclaw").strip().lower()
+
+
+def _container_name(short_id: str) -> str:
+    prefix = (settings.dedicated_runtime_container_name_prefix or "openclaw-user").strip() or "openclaw-user"
+    return f"{prefix}-{short_id}"
+
+
+def _data_volume_name(short_id: str) -> str:
+    prefix = (settings.dedicated_runtime_data_volume_prefix or "openclaw-data").strip() or "openclaw-data"
+    return f"{prefix}-{short_id}"
+
+
+def _internal_port() -> int:
+    if _runtime_backend() == "hermes":
+        return settings.dedicated_hermes_internal_port
+    return 18080
+
+
+def _runtime_image() -> str:
+    if _runtime_backend() == "hermes":
+        return settings.hermes_image
+    return settings.openclaw_image
+
+
+def _runtime_mount_target() -> str:
+    if _runtime_backend() == "hermes":
+        return "/workspace"
+    return "/root/.openclaw"
+
+
+def _runtime_command() -> list[str]:
+    if _runtime_backend() == "hermes":
+        return []
+    return ["node", "bridge/dist/bridge/start.js"]
+
+
+def _runtime_environment(container_token: str, sso_token: str | None) -> dict[str, str]:
+    env = {
+        "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
+        "NANOBOT_PROXY__TOKEN": container_token,
+        "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
+        "TZ": settings.container_tz,
+    }
+    if _runtime_backend() == "openclaw":
+        env["BRIDGE_ENABLE_CHANNELS"] = "1"
+    else:
+        env.update(
+            {
+                "PYTHONUNBUFFERED": "1",
+                "API_SERVER_ENABLED": "true",
+                "API_SERVER_HOST": "0.0.0.0",
+                "API_SERVER_PORT": str(settings.dedicated_hermes_internal_port),
+                "API_SERVER_KEY": settings.dedicated_hermes_api_key,
+                "GATEWAY_ALLOW_ALL_USERS": "true",
+                "OPENAI_API_KEY": settings.dedicated_hermes_default_api_key,
+            }
+        )
+    if sso_token:
+        env["INFOX_MED_TOKEN"] = sso_token
+    return env
+
+
+def _runtime_published_ports() -> dict[str, tuple[str, int | None]]:
+    if _runtime_backend() == "hermes":
+        return {
+            f"{_internal_port()}/tcp": (settings.user_container_bind_ip, None),
+        }
+    return {
+        "5900/tcp": (settings.user_container_bind_ip, None),
+        "30000/tcp": (settings.user_container_bind_ip, None),
+    }
+
+
+def _runtime_preferred_ports(browser_port: int | None, service_port: int | None) -> dict[str, tuple[str, int | None]] | None:
+    if _runtime_backend() == "hermes":
+        return None
+    if browser_port is None or service_port is None or browser_port == service_port:
+        return None
+    return {
+        "5900/tcp": (settings.user_container_bind_ip, browser_port),
+        "30000/tcp": (settings.user_container_bind_ip, service_port),
+    }
+
+
+def _published_port_bindings(container: docker.models.containers.Container) -> tuple[tuple[str, str], tuple[str, str]]:
+    if _runtime_backend() == "hermes":
+        return ("", ""), _published_binding(container, f"{_internal_port()}/tcp")
+    return _published_binding(container, "5900/tcp"), _published_binding(container, "30000/tcp")
+
+
+def _build_runtime_metadata_markdown(user_id: str, container_name: str, runtime_backend: str) -> str:
+    now = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
+    payload = {
+        "user_id": user_id,
+        "container": container_name,
+        "runtime_backend": runtime_backend,
+        "generated_at": now,
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _build_hermes_config_yaml() -> str:
+    config = {
+        "model": {
+            "default": settings.default_model,
+            "provider": settings.dedicated_hermes_default_provider,
+            "base_url": settings.dedicated_hermes_default_base_url,
+        },
+    }
+    return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
+
+
+def _build_hermes_env_file() -> str:
+    lines = [
+        f"API_SERVER_KEY={settings.dedicated_hermes_api_key}",
+        "GATEWAY_ALLOW_ALL_USERS=true",
+    ]
+    default_api_key = (settings.dedicated_hermes_default_api_key or "").strip()
+    if default_api_key:
+        lines.append(f"OPENAI_API_KEY={default_api_key}")
+    return "\n".join(lines) + "\n"
+
+
+def _write_runtime_metadata(container: docker.models.containers.Container, markdown: str) -> None:
+    content = markdown.encode("utf-8")
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+        workspace_dir = tarfile.TarInfo(name="workspace")
+        workspace_dir.type = tarfile.DIRTYPE
+        workspace_dir.mode = 0o755
+        workspace_dir.mtime = int(time.time())
+        tar.addfile(workspace_dir)
+
+        metadata_file = tarfile.TarInfo(name="workspace/platform-runtime.json")
+        metadata_file.size = len(content)
+        metadata_file.mode = 0o644
+        metadata_file.mtime = int(time.time())
+        tar.addfile(metadata_file, io.BytesIO(content))
+
+    tar_buffer.seek(0)
+    ok = container.put_archive("/", tar_buffer.read())
+    if not ok:
+        raise RuntimeError("failed to write platform-runtime.json into container workspace")
+
+
+def _write_hermes_runtime_files(container: docker.models.containers.Container) -> None:
+    config_content = _build_hermes_config_yaml().encode("utf-8")
+    env_content = _build_hermes_env_file().encode("utf-8")
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+        config_file = tarfile.TarInfo(name="config.yaml")
+        config_file.size = len(config_content)
+        config_file.mode = 0o644
+        config_file.mtime = int(time.time())
+        tar.addfile(config_file, io.BytesIO(config_content))
+
+        env_file = tarfile.TarInfo(name=".env")
+        env_file.size = len(env_content)
+        env_file.mode = 0o600
+        env_file.mtime = int(time.time())
+        tar.addfile(env_file, io.BytesIO(env_content))
+
+    tar_buffer.seek(0)
+    ok = container.put_archive("/opt/data", tar_buffer.read())
+    if not ok:
+        raise RuntimeError("failed to write Hermes config.yaml/.env into container data volume")
 
 
 def _build_expose_port_skill_markdown(
@@ -218,6 +391,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     """
     container_token = secrets.token_urlsafe(32)
     short_id = user_id[:8]
+    runtime_backend = _runtime_backend()
 
     # Insert DB record to claim the unique user_id slot.
     # ON CONFLICT DO NOTHING avoids PostgreSQL ERROR logs on races.
@@ -229,7 +403,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
             container_token=container_token,
             status="creating",
             internal_host="",
-            internal_port=18080,
+            internal_port=_internal_port(),
         )
         .on_conflict_do_nothing(index_elements=["user_id"])
         .returning(Container.__table__.c.id)
@@ -247,8 +421,8 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     _ensure_network()
     client = _docker()
 
-    data_vol = f"openclaw-data-{short_id}"
-    container_name = f"openclaw-user-{short_id}"
+    data_vol = _data_volume_name(short_id)
+    container_name = _container_name(short_id)
 
     # Remove any stale container with the same name
     try:
@@ -258,28 +432,20 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
         pass
 
     # Fetch user's SSO token if available (e.g. InfoX-Med)
-    # user_result = await db.execute(select(User).where(User.id == user_id))
-    # user_row = user_result.scalar_one_or_none()
-    # sso_token = user_row.sso_token if user_row else None
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user_row = user_result.scalar_one_or_none()
+    sso_token = user_row.sso_token if user_row else None
 
-    container_env = {
-        "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
-        "NANOBOT_PROXY__TOKEN": container_token,
-        "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
-        "TZ": settings.container_tz,
-        "BRIDGE_ENABLE_CHANNELS": "1",
-    }
-    # if sso_token:
-    #     container_env["SSO_TOKEN"] = sso_token
+    container_env = _runtime_environment(container_token, sso_token)
 
     run_kwargs = {
-        "image": settings.openclaw_image,
-        "command": ["node", "bridge/dist/bridge/start.js"],
+        "image": _runtime_image(),
+        "command": _runtime_command(),
         "name": container_name,
         "detach": True,
         "environment": container_env,
         "mounts": [
-            docker.types.Mount("/root/.openclaw", data_vol, type="volume"),
+            docker.types.Mount(_runtime_mount_target(), data_vol, type="volume"),
         ],
         "network": settings.container_network,
         "mem_limit": settings.container_memory_limit,
@@ -294,34 +460,21 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
         preferred_browser_port = binding.host_port_browser if binding is not None else None
         preferred_service_port = binding.host_port_service if binding is not None else None
 
-        preferred_usable = (
-            preferred_browser_port is not None
-            and preferred_service_port is not None
-            and preferred_browser_port != preferred_service_port
-            and not _is_host_port_in_use(client, preferred_browser_port)
-            and not _is_host_port_in_use(client, preferred_service_port)
+        preferred_ports = _runtime_preferred_ports(preferred_browser_port, preferred_service_port)
+        preferred_usable = preferred_ports is not None and all(
+            not _is_host_port_in_use(client, host_port)
+            for _container_port, (_host_ip, host_port) in preferred_ports.items()
+            if host_port is not None
         )
 
-        if preferred_usable:
-            run_kwargs["ports"] = {
-                "5900/tcp": (settings.user_container_bind_ip, preferred_browser_port),
-                "30000/tcp": (settings.user_container_bind_ip, preferred_service_port),
-            }
-        else:
-            run_kwargs["ports"] = {
-                "5900/tcp": (settings.user_container_bind_ip, None),
-                "30000/tcp": (settings.user_container_bind_ip, None),
-            }
+        run_kwargs["ports"] = preferred_ports if preferred_usable else _runtime_published_ports()
 
     try:
         docker_container = client.containers.run(**run_kwargs)
     except DockerAPIError as exc:
         # Preferred ports can race with other creators; fallback to random publish.
         if settings.user_container_publish_ports and "port is already allocated" in str(exc).lower():
-            run_kwargs["ports"] = {
-                "5900/tcp": (settings.user_container_bind_ip, None),
-                "30000/tcp": (settings.user_container_bind_ip, None),
-            }
+            run_kwargs["ports"] = _runtime_published_ports()
             docker_container = client.containers.run(**run_kwargs)
         else:
             await db.rollback()
@@ -333,16 +486,24 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
 
     # Read container IP on the internal network
     docker_container.reload()
-    browser_binding = _published_binding(docker_container, "5900/tcp")
-    service_binding = _published_binding(docker_container, "30000/tcp")
-    expose_markdown = _build_expose_port_skill_markdown(
-        user_id=user_id,
-        container_name=container_name,
-        browser_binding=browser_binding,
-        service_binding=service_binding,
-        public_base_url=settings.public_base_url,
-    )
-    _write_expose_port_skill(docker_container, expose_markdown)
+    browser_binding, service_binding = _published_port_bindings(docker_container)
+    if runtime_backend == "openclaw":
+        expose_markdown = _build_expose_port_skill_markdown(
+            user_id=user_id,
+            container_name=container_name,
+            browser_binding=browser_binding,
+            service_binding=service_binding,
+            public_base_url=settings.public_base_url,
+        )
+        _write_expose_port_skill(docker_container, expose_markdown)
+    else:
+        runtime_metadata = _build_runtime_metadata_markdown(
+            user_id=user_id,
+            container_name=container_name,
+            runtime_backend=runtime_backend,
+        )
+        _write_runtime_metadata(docker_container, runtime_metadata)
+        _write_hermes_runtime_files(docker_container)
 
     network_settings = docker_container.attrs["NetworkSettings"]["Networks"]
     internal_ip = network_settings.get(settings.container_network, {}).get("IPAddress", "")

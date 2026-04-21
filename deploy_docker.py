@@ -24,14 +24,14 @@
   # 仅重启服务
   python deploy_docker.py --restart
 
-  # 重建指定服务（逗号分隔，openclaw 表示基础镜像）
-  python deploy_docker.py --rebuild openclaw,gateway,frontend,manage-front,simple-front,shared-openclaw,share-openclaw-front
+  # 重建指定服务（逗号分隔，hermes 表示 Hermes 基础镜像）
+  python deploy_docker.py --rebuild hermes,gateway,frontend,manage-front,simple-front,shared-openclaw,share-openclaw-front
   python deploy_docker.py --rebuild gateway
   python deploy_docker.py --rebuild frontend
 
   # 使用缓存快速重建（不使用 --no-cache）
   python deploy_docker.py --rebuild gateway --fast
-  python deploy_docker.py --rebuild openclaw,gateway --fast
+  python deploy_docker.py --rebuild hermes,gateway --fast
 
   # 完全清理重建
   python deploy_docker.py --clean
@@ -203,6 +203,33 @@ def build_openclaw_image_fast():
     success("openclaw:latest 构建完成")
 
 
+def sync_deploy_copy_to_hermes():
+    """将 deploy_copy 内容复制到 hermes-agent/deploy_copy/，供 Hermes 镜像构建打包。"""
+    deploy_dir = os.path.join(PROJECT_DIR, "deploy_copy")
+    if not os.path.isdir(deploy_dir):
+        return
+
+    dst = os.path.join(PROJECT_DIR, "hermes-agent", "deploy_copy")
+    if os.path.exists(dst):
+        shutil.rmtree(dst)
+    shutil.copytree(deploy_dir, dst)
+    success("deploy_copy → hermes-agent/deploy_copy/ 已同步")
+
+
+def build_hermes_image():
+    """单次构建 Hermes dedicated bridge 镜像（Dockerfile.bridge 内含多 stage）。"""
+    log("构建 nanobot-hermes-agent:latest dedicated bridge 镜像...")
+    run("docker build --no-cache -f hermes-agent/Dockerfile.bridge -t nanobot-hermes-agent:latest hermes-agent/")
+    success("nanobot-hermes-agent:latest 构建完成")
+
+
+def build_hermes_image_fast():
+    """使用缓存单次构建 Hermes dedicated bridge 镜像（Dockerfile.bridge 内含多 stage）。"""
+    log("构建 nanobot-hermes-agent:latest dedicated bridge 镜像（使用缓存）...")
+    run("docker build -f hermes-agent/Dockerfile.bridge -t nanobot-hermes-agent:latest hermes-agent/")
+    success("nanobot-hermes-agent:latest 构建完成")
+
+
 def _build_task(name: str, cmd: str):
     """在子线程中执行构建命令，返回 (name, returncode, elapsed)。"""
     log(f"[并行] 开始构建: {name}")
@@ -341,7 +368,7 @@ def show_status(compose_file: str, host: str, gateway_port: int, frontend_port: 
     print(f"  简化版前端:      http://{host}:{simple_port}")
     print(f"  管理员前端:      http://{host}:3081")
     print(f"  共享前端:        http://{host}:{share_front_port}")
-    print(f"  共享OpenClaw:    http://{host}:18080")
+    print(f"  共享Hermes(API): http://{host}:8080")
     print(f"  platform网关:    http://{host}:{gateway_port}")
     print(f"  使用的compose文件: {compose_file}")
     print(f"{'=' * 50}\n")
@@ -367,9 +394,9 @@ def main():
     )
     parser.add_argument("--build-only", action="store_true", help="仅构建镜像，不启动服务")
     parser.add_argument("--restart", action="store_true", help="仅重启服务")
-    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (openclaw,gateway,frontend)")
+    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (hermes,gateway,frontend,shared-openclaw,share-openclaw-front,manage-front,simple-front)")
     parser.add_argument("--clean", action="store_true", help="停止所有服务并清理数据")
-    parser.add_argument("--skip-base", action="store_true", help="跳过构建 openclaw 基础镜像")
+    parser.add_argument("--skip-base", action="store_true", help="跳过构建 Hermes dedicated bridge 基础镜像")
     parser.add_argument("--skip-health", action="store_true", help="跳过健康检查")
     parser.add_argument("--status", action="store_true", help="仅显示当前状态")
     parser.add_argument("--fast", action="store_true", help="使用 Docker 缓存加快构建速度（不使用 --no-cache）")
@@ -410,30 +437,18 @@ def main():
 
         # 同步 deploy_copy
         sync_deploy_copy_to_bridge()
+        sync_deploy_copy_to_hermes()
 
-        # "openclaw" 表示重建基础镜像 + 清理旧用户容器
         if "openclaw" in services:
-            if args.fast:
-                build_openclaw_image_fast()
-            else:
-                build_openclaw_image()
+            warn("当前 hermes 分支默认不再重建 openclaw 基础镜像，已忽略 openclaw 关键字")
             services.remove("openclaw")
 
-            # 清理旧用户容器（它们用的是旧镜像）
-            log("清理旧用户容器...")
-            result = subprocess.run(
-                'docker ps -a --filter "name=openclaw-user-" -q',
-                shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
-            )
-            container_ids = result.stdout.strip()
-            if container_ids:
-                run(f"docker rm -f {container_ids}", check=False)
-                success("旧用户容器已清理")
-
-            # 清理 DB 中的容器记录，注释掉，不要删除数据库中的记录了
-            # log("清理数据库容器记录...")
-            # run('docker exec openclaw-postgres psql -U nanobot -d nanobot_platform -c "DELETE FROM containers;"', check=False)
-            # success("数据库容器记录已清理")
+        if "hermes" in services:
+            if args.fast:
+                build_hermes_image_fast()
+            else:
+                build_hermes_image()
+            services.remove("hermes")
 
         # 设置 VITE_API_URL（frontend 构建需要）
         if args.host and args.gateway_port:
@@ -456,8 +471,9 @@ def main():
 
     check_env_file()
 
-    # 同步 deploy_copy 到 bridge 构建目录
+    # 同步 deploy_copy 到 runtime 构建目录
     sync_deploy_copy_to_bridge()
+    sync_deploy_copy_to_hermes()
 
     # 设置 VITE_API_URL（frontend 构建需要）
     api_url = resolve_vite_api_url(args.host, args.gateway_port, args.relative_api)
@@ -467,10 +483,10 @@ def main():
     compose_args = f"-f {args.compose}"
 
     if not args.skip_base:
-        # 并行构建: openclaw 基础镜像 + compose 服务
-        log("并行构建 openclaw 基础镜像 + compose 服务...")
+        # 并行构建: Hermes dedicated bridge 基础镜像 + compose 服务
+        log("并行构建 Hermes dedicated bridge 基础镜像 + compose 服务...")
         tasks = {
-            "openclaw:latest": "docker build --no-cache -f openclaw/Dockerfile.bridge -t openclaw:latest openclaw/",
+            "nanobot-hermes-agent:latest": "docker build --no-cache -f hermes-agent/Dockerfile.bridge -t nanobot-hermes-agent:latest hermes-agent/",
             "compose services": f"docker compose {compose_args} build --parallel",
         }
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:

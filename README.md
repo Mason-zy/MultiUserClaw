@@ -1,6 +1,6 @@
-# MultiUserClaw - 多用户 AI SaaS OpenClaw 平台
+# MultiUserClaw - 多用户 AI SaaS Hermes Agent 平台
 
-基于 OpenClaw 改造的轻量级 AI 助手框架，可以快速打造商用 SaaS 平台，支持多租户隔离部署、多平台渠道接入、工具调用、定时任务和 Web 实时通信。
+基于 Hermes 改造的轻量级 AI 助手框架，可以快速打造商用 SaaS 平台，支持多租户隔离部署、多平台渠道接入、工具调用、定时任务和 Web 实时通信。
 
 **在线体验地址**：https://ai.infox-med.com:13080/ （直接注册即可使用）
 

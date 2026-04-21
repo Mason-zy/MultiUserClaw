@@ -25,11 +25,11 @@ import {
   deleteSession,
   updateSessionTitle,
   sendChatMessage,
+  getRunEventsStreamUrl,
   waitForAgentRun,
   listAgents,
   listSlashCommands,
   uploadFileToWorkspace,
-  getAccessToken,
 } from '../lib/api'
 import type { Session, SessionDetail, AgentInfo } from '../lib/api'
 import {
@@ -421,7 +421,6 @@ export default function Chat() {
 
       // Wait for response completion by runId; SSE still handles incremental text.
       await waitForResponse(activeSessionKey, sendResult.runId)
-
       fetchSessions()
     } catch (err: any) {
       if (activeSessionKey) clearPendingSession(activeSessionKey)
@@ -432,182 +431,141 @@ export default function Chat() {
   }
 
   // SSE connection for real-time chat events (replaces WebSocket)
-  const sseRef = useRef<EventSource | null>(null)
+  const runSseRef = useRef<EventSource | null>(null)
   const sseCompletedRef = useRef(false)
-  const sseFinalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const streamRunEvents = useCallback((key: string, runId: string) => {
+    return new Promise<void>((resolve, reject) => {
+      if (runSseRef.current) {
+        runSseRef.current.close()
+        runSseRef.current = null
+      }
 
-  const handleChatEvent = useCallback((payload: any) => {
-    const { state, sessionKey } = payload
-    const currentKey = activeSessionKeyRef.current
-    console.log('[SSE] handleChatEvent:', { state, sessionKey, currentKey })
-    if (!sessionKey || !currentKey) {
-      console.log('[SSE] 跳过: sessionKey或currentKey为空')
-      return
-    }
+      let accumulated = ''
+      let settled = false
+      const sse = new EventSource(getRunEventsStreamUrl(runId))
+      runSseRef.current = sse
 
-    const normalizedGw = sessionKey.replace(/:/g, '')
-    const normalizedActive = currentKey.replace(/:/g, '')
-    const isCurrentSession = normalizedGw === normalizedActive || sessionKey === currentKey
-    console.log('[SSE] session匹配:', { normalizedGw, normalizedActive, isCurrentSession })
-    if (!isCurrentSession) return
-
-    // Streaming delta — extract text and update incrementally
-    if (state === 'delta' && payload.message) {
-      const content = payload.message.content
-      console.log('[SSE] delta内容:', JSON.stringify(content)?.substring(0, 200))
-      if (Array.isArray(content)) {
-        const textPart = content.find((c: any) => c.type === 'text')
-        if (textPart?.text) {
-          setStreamingText(textPart.text)
+      const closeStream = () => {
+        sse.close()
+        if (runSseRef.current === sse) {
+          runSseRef.current = null
         }
-      } else if (typeof content === 'string') {
-        setStreamingText(content)
-      }
-      return
-    }
-
-    // Started — clear streaming text for new turn
-    if (state === 'started') {
-      setStreamingText('')
-      setAgentRunning(true)
-      return
-    }
-
-    // Final / error / aborted — load final messages, THEN clear streaming
-    if (state === 'final' || state === 'error' || state === 'aborted') {
-      // Show error info to user when agent execution fails
-      if (state === 'error') {
-        const errDetail = payload.error || payload.message?.error || payload.detail
-        const errMsg = typeof errDetail === 'string'
-          ? errDetail
-          : errDetail?.message || ''
-        setError(`Agent 执行出错: ${errMsg || '请检查当前模型是否可用'}`)
       }
 
-      // Don't clear streamingText yet — keep it visible until messages load
-
-      // Debounce: reset the completion timer on every "final"
-      if (sseFinalTimerRef.current) clearTimeout(sseFinalTimerRef.current)
-      sseFinalTimerRef.current = setTimeout(() => {
-        // No new "final" events for 3s — agent is truly done
-        getSession(currentKey).then(detail => {
-          setMessages(detail.messages || [])
-          setStreamingText('')
-          setSending(false)
-          setAgentRunning(false)
-          sseCompletedRef.current = true
-          fetchSessions()
-        }).catch(() => {
-          setStreamingText('')
-          setSending(false)
-          setAgentRunning(false)
-          sseCompletedRef.current = true
-        })
-      }, 3000)
-    }
-  }, [fetchSessions])
-
-  // Handle agent events (tool execution, lifecycle) to maintain loading state
-  const handleAgentEvent = useCallback((payload: any) => {
-    const { stream, data, sessionKey } = payload
-    const currentKey = activeSessionKeyRef.current
-    if (!sessionKey || !currentKey) return
-
-    const normalizedGw = sessionKey.replace(/:/g, '')
-    const normalizedActive = currentKey.replace(/:/g, '')
-    const isCurrentSession = normalizedGw === normalizedActive || sessionKey === currentKey
-    if (!isCurrentSession) return
-
-    if (stream === 'tool') {
-      const phase = data?.phase
-      console.log('[SSE] agent tool event:', { phase })
-      // Tool starting/calling — agent is still working, cancel any completion timer
-      if (phase === 'start' || phase === 'call') {
-        if (sseFinalTimerRef.current) {
-          clearTimeout(sseFinalTimerRef.current)
-          sseFinalTimerRef.current = null
-        }
-        setAgentRunning(true)
+      const finish = (fn: () => void) => {
+        if (settled) return
+        settled = true
+        closeStream()
+        fn()
       }
-    } else if (stream === 'lifecycle') {
-      const phase = data?.phase
-      console.log('[SSE] agent lifecycle event:', { phase })
-      // Agent run ended — no more events expected, allow completion
-      if (phase === 'end') {
-        // Use the same debounce pattern as chat final
-        if (sseFinalTimerRef.current) clearTimeout(sseFinalTimerRef.current)
-        sseFinalTimerRef.current = setTimeout(() => {
-          const key = activeSessionKeyRef.current
-          if (key) {
-            getSession(key).then(detail => {
-              setMessages(detail.messages || [])
+
+      const sessionMatches = (sessionKey: string | null | undefined) => {
+        if (!sessionKey) return true
+        const currentKey = activeSessionKeyRef.current
+        if (!currentKey) return false
+        const normalizedGw = sessionKey.replace(/:/g, '')
+        const normalizedActive = currentKey.replace(/:/g, '')
+        return normalizedGw === normalizedActive || sessionKey === currentKey
+      }
+
+      sse.onmessage = (evt) => {
+        try {
+          const payload = JSON.parse(evt.data)
+          const eventType = String(payload.type || payload.event || '')
+          const sessionKey = typeof payload.session_id === 'string' ? payload.session_id : key
+
+          if (!sessionMatches(sessionKey)) {
+            return
+          }
+
+          if (eventType === 'message.delta') {
+            const delta = typeof payload.delta === 'string' ? payload.delta : ''
+            if (!delta) return
+            accumulated += delta
+            setStreamingText(accumulated)
+            setAgentRunning(true)
+            return
+          }
+
+          if (eventType === 'message.completed') {
+            const content = payload.message?.content
+            if (typeof content === 'string') {
+              accumulated = content
+              setStreamingText(accumulated)
+            }
+            return
+          }
+
+          if (eventType === 'tool.started') {
+            setAgentRunning(true)
+            return
+          }
+
+          if (eventType === 'run.completed') {
+            finish(() => {
+              getSession(key).then(detail => {
+                setMessages(detail.messages || [])
+                setStreamingText('')
+                setSending(false)
+                setAgentRunning(false)
+                sseCompletedRef.current = true
+                fetchSessions()
+                resolve()
+              }).catch((err) => {
+                setStreamingText('')
+                setSending(false)
+                setAgentRunning(false)
+                sseCompletedRef.current = true
+                reject(err)
+              })
+            })
+            return
+          }
+
+          if (eventType === 'run.failed') {
+            finish(() => {
               setStreamingText('')
               setSending(false)
               setAgentRunning(false)
               sseCompletedRef.current = true
-              fetchSessions()
-            }).catch(() => {
-              setStreamingText('')
-              setSending(false)
-              setAgentRunning(false)
-              sseCompletedRef.current = true
+              reject(new Error(String(payload.error || 'run failed')))
             })
           }
-        }, 1000)
-      }
-    }
-  }, [fetchSessions])
-
-  // Connect SSE on mount
-  useEffect(() => {
-    console.log('[SSE] useEffect 触发')
-    const token = getAccessToken()
-    if (!token) {
-      console.log('[SSE] 没有token，跳过SSE连接')
-      return
-    }
-    // Always use relative URL so SSE goes through Vite proxy, avoiding CORS issues
-    const url = `/api/openclaw/events/stream?token=${encodeURIComponent(token)}`
-    console.log('[SSE] 正在连接:', url)
-    const sse = new EventSource(url)
-    sseRef.current = sse
-
-    sse.onopen = () => {
-      console.log('[SSE] 连接成功')
-    }
-
-    sse.onmessage = (evt) => {
-      console.log('[SSE] 收到消息:', evt.data?.substring(0, 100))
-      try {
-        const msg = JSON.parse(evt.data)
-        if (msg.event === 'chat' && msg.payload) {
-          handleChatEvent(msg.payload)
-        } else if (msg.event === 'agent' && msg.payload) {
-          handleAgentEvent(msg.payload)
+        } catch {
+          // ignore malformed chunks
         }
-      } catch {
-        // ignore
+      }
+
+      sse.onerror = () => {
+        finish(() => {
+          reject(new Error('run event stream disconnected'))
+        })
+      }
+    })
+  }, [fetchSessions, getRunEventsStreamUrl, setStreamingText])
+
+  useEffect(() => {
+    return () => {
+      if (typewriterTimerRef.current) clearInterval(typewriterTimerRef.current)
+      if (runSseRef.current) {
+        runSseRef.current.close()
+        runSseRef.current = null
       }
     }
-
-    sse.onerror = (e) => {
-      console.log('[SSE] 连接错误, readyState:', sse.readyState, e)
-    }
-
-    return () => {
-      console.log('[SSE] 清理连接')
-      if (sseFinalTimerRef.current) clearTimeout(sseFinalTimerRef.current)
-      if (typewriterTimerRef.current) clearInterval(typewriterTimerRef.current)
-      sse.close()
-      sseRef.current = null
-    }
-  }, [handleChatEvent, handleAgentEvent])
+  }, [])
 
   const waitForResponse = async (key: string, runId: string | null) => {
-    // SSE handles incremental display. Completion should come from runId-based
-    // waiting so we don't mistake a partial assistant message for a finished turn.
     sseCompletedRef.current = false
-    const maxWaitMs = 600000 // 10 minutes max
+    if (runId) {
+      try {
+        await streamRunEvents(key, runId)
+        return
+      } catch {
+        if (key !== activeSessionKeyRef.current) return
+      }
+    }
+
+    const maxWaitMs = 240000 // 4 minutes max
     const perRequestTimeoutMs = 25000
     const startTime = Date.now()
 
@@ -625,13 +583,6 @@ export default function Chat() {
 
           if (waitResult.status === 'timeout') {
             continue
-          }
-
-          if (waitResult.status === 'error') {
-            const errMsg = typeof waitResult.error === 'string'
-              ? waitResult.error
-              : (waitResult.error as any)?.message || ''
-            setError(`模型响应失败: ${errMsg || '请检查当前模型配置是否正确'}`)
           }
 
           const detail = await getSession(key)
@@ -668,6 +619,7 @@ export default function Chat() {
       setMessages(detail.messages || [])
     } catch {}
     setStreamingText('')
+    setAgentRunning(false)
     sseCompletedRef.current = true
   }
 
@@ -924,13 +876,7 @@ export default function Chat() {
                 </div>
               ) : (
                 <div className="space-y-4 max-w-3xl mx-auto">
-                  {messages.filter(msg => {
-                    if (msg.role !== 'user' && msg.role !== 'assistant') return false
-                    // Hide internal system notifications injected as user messages
-                    const text = typeof msg.content === 'string' ? msg.content : ''
-                    if (text.includes('System (untrusted):') || text.includes('An async command you ran earlier has completed')) return false
-                    return true
-                  }).map((msg, i) => (
+                  {messages.map((msg, i) => (
                     <div
                       key={i}
                       className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}
