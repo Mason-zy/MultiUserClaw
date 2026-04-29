@@ -173,22 +173,6 @@ def check_env_file():
         warn("未配置管理员账号 (ADMIN_USERNAME / ADMIN_PASSWORD)，管理后台将无法登录")
 
 
-
-def sync_deploy_copy_to_bridge():
-    """将 deploy_copy 内容复制到 openclaw/bridge-deploy-copy/，
-    供 Dockerfile 和 entrypoint 在容器启动时同步到用户 ~/.openclaw/。
-    """
-    deploy_dir = os.path.join(PROJECT_DIR, "deploy_copy")
-    if not os.path.isdir(deploy_dir):
-        return
-
-    dst = os.path.join(PROJECT_DIR, "openclaw", "bridge-deploy-copy")
-    if os.path.exists(dst):
-        shutil.rmtree(dst)
-    shutil.copytree(deploy_dir, dst)
-    success(f"deploy_copy → openclaw/bridge-deploy-copy/ 已同步")
-
-
 def build_openclaw_image():
     """构建 openclaw 基础镜像（用户容器使用）。"""
     log("构建 openclaw:latest 基础镜像...")
@@ -436,7 +420,6 @@ def main():
         services = [s.strip() for s in args.rebuild.split(",") if s.strip()]
 
         # 同步 deploy_copy
-        sync_deploy_copy_to_bridge()
         sync_deploy_copy_to_hermes()
 
         if "openclaw" in services:
@@ -472,7 +455,6 @@ def main():
     check_env_file()
 
     # 同步 deploy_copy 到 runtime 构建目录
-    sync_deploy_copy_to_bridge()
     sync_deploy_copy_to_hermes()
 
     # 设置 VITE_API_URL（frontend 构建需要）
