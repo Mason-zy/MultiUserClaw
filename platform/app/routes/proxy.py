@@ -18,6 +18,7 @@ from app.config import settings
 from app.container.manager import ensure_running, get_container
 from app.db.engine import async_session, get_db
 from app.db.models import User
+from app.runtime_backends.hermes_files import read_file_from_hermes_container
 
 logger = logging.getLogger("platform.routes.proxy")
 router = APIRouter(prefix="/api/openclaw", tags=["proxy"])
@@ -263,22 +264,24 @@ async def _proxy_file_request(request: Request, token: str, bridge_path: str):
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    async with async_session() as db:
-        base_url = await _container_url(db, user)
-
     bridge_path = bridge_path.lstrip("/")
     runtime_backend = (settings.dedicated_runtime_backend or "openclaw").strip().lower()
     if runtime_backend == "hermes":
         requested_path = request.query_params.get("path", "")
         normalized_path = requested_path if requested_path.startswith("/") else f"/{requested_path}" if requested_path else ""
-        if bridge_path == "filemanager/serve" and normalized_path.startswith("/workspace/"):
-            target_url = f"{base_url}{normalized_path}"
+        if bridge_path == "filemanager/serve":
+            async with async_session() as db:
+                container = await ensure_running(db, user.id)
+            content, media_type = read_file_from_hermes_container(container.docker_id, normalized_path)
+            return Response(content=content, media_type=media_type)
         else:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Dedicated Hermes file proxy currently supports /workspace paths via filemanager/serve only",
             )
     else:
+        async with async_session() as db:
+            base_url = await _container_url(db, user)
         target_url = f"{base_url}/api/{bridge_path}"
         if request.query_params:
             target_url += f"?{request.query_params}"

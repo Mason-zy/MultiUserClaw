@@ -1,8 +1,37 @@
 import pytest
-
+from app.db.models import User
 from app.runtime.event_translator import hermes_event_to_openclaw_sse
-from app.runtime.session_mapper import normalize_platform_session_key
 from app.runtime.run_mapper import normalize_platform_run_id
+from app.runtime.session_mapper import normalize_platform_session_key
+from app.runtime_backend import RuntimeContext
+
+
+def make_user(runtime_mode: str = "dedicated") -> User:
+    return User(
+        id="u1",
+        username="tester",
+        email="tester@example.com",
+        password_hash="x",
+        runtime_mode=runtime_mode,
+        is_active=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_openclaw_skills_route_uses_runtime_backend(monkeypatch):
+    from app.api_compat import openclaw_compat
+
+    class FakeBackend:
+        async def list_skills(self, ctx: RuntimeContext):
+            assert ctx.user.username == "tester"
+            assert ctx.scope == "dedicated"
+            return [{"name": "dogfood", "description": "QA testing", "source": "hermes"}]
+
+    monkeypatch.setattr(openclaw_compat, "get_runtime_backend", lambda user: FakeBackend())
+
+    payload = await openclaw_compat.list_dedicated_skills(make_user())
+
+    assert payload == [{"name": "dogfood", "description": "QA testing", "source": "hermes"}]
 
 
 def test_normalize_platform_session_key_preserves_existing_key():

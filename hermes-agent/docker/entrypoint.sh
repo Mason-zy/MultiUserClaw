@@ -97,6 +97,7 @@ except Exception as e:
 proxy_url = os.environ.get('NANOBOT_PROXY__URL', '').strip()
 proxy_token = os.environ.get('NANOBOT_PROXY__TOKEN', '').strip()
 default_model = os.environ.get('NANOBOT_AGENTS__DEFAULTS__MODEL', '').strip()
+api_toolsets_raw = os.environ.get('HERMES_API_TOOLSETS', '').strip()
 
 if not proxy_url or not proxy_token:
     sys.exit(0)
@@ -134,6 +135,20 @@ config['model']['provider'] = 'platform-gateway'
 # Set default model if specified
 if default_model:
     config['model']['default'] = default_model
+
+def parse_api_toolsets(raw):
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered in {'none', 'off', 'false', '0'}:
+        return []
+    if lowered in {'full', 'default', 'hermes-api-server'}:
+        return ['hermes-api-server']
+    return [part.strip() for part in raw.replace(';', ',').split(',') if part.strip()]
+
+api_toolsets = parse_api_toolsets(api_toolsets_raw)
+if api_toolsets is not None:
+    config.setdefault('platform_toolsets', {})['api_server'] = api_toolsets
 
 # Save updated config
 try:

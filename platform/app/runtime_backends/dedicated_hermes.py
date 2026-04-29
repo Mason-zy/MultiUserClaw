@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import io
 import json
-import tarfile
-import time
 from typing import Any
 
 import httpx
@@ -16,6 +13,19 @@ from app.container.manager import ensure_running
 from app.db.engine import async_session
 from app.hermes_client import HermesClient
 from app.runtime_backend import RuntimeContext
+from app.runtime_backends.hermes_files import (
+    DEFAULT_HERMES_UPLOAD_DIR,
+    write_upload_to_hermes_container,
+)
+from app.runtime_backends.hermes_run import (
+    HermesEventSanitizer,
+    sanitize_hermes_message,
+    sanitize_hermes_messages,
+    sanitize_run_events,
+    sanitize_sse_block,
+    summarize_run_events,
+)
+from app.runtime_backends.hermes_skills import list_skills_from_hermes_container
 
 
 class DedicatedHermesBackend:
@@ -40,6 +50,8 @@ class DedicatedHermesBackend:
         return HermesClient(
             base_url=await self._resolve_base_url(ctx),
             api_key=settings.dedicated_hermes_api_key,
+            connect_retries=settings.hermes_connect_retries,
+            retry_delay_seconds=settings.hermes_retry_delay_seconds,
         )
 
     async def _request(self, ctx: RuntimeContext, method: str, path: str, **kwargs) -> Any:
@@ -68,6 +80,11 @@ class DedicatedHermesBackend:
         models = payload.get("data") if isinstance(payload, dict) else []
         return {"agents": models if isinstance(models, list) else []}
 
+    async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
+        async with async_session() as db:
+            container = await ensure_running(db, ctx.user.id)
+        return list_skills_from_hermes_container(container.docker_id)
+
     async def list_sessions(self, ctx: RuntimeContext) -> list[dict]:
         payload = await self._request(ctx, "GET", "/api/hermes/sessions")
         sessions = payload.get("sessions") if isinstance(payload, dict) else []
@@ -80,6 +97,7 @@ class DedicatedHermesBackend:
         messages = payload.get("messages")
         if not isinstance(messages, list):
             messages = []
+        messages = sanitize_hermes_messages(messages)
         return {
             "key": payload.get("session_id", session_key),
             "sessionKey": payload.get("session_id", session_key),
@@ -105,18 +123,8 @@ class DedicatedHermesBackend:
 
     async def wait_run(self, ctx: RuntimeContext, run_id: str, timeout_ms: int):
         events = await (await self._client(ctx)).collect_run_events(run_id, timeout_ms=timeout_ms)
-        final_message = {}
-        status_text = "pending"
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            event_type = event.get("type")
-            if event_type == "message.completed" and isinstance(event.get("message"), dict):
-                final_message = event["message"]
-            if event_type == "run.completed":
-                status_text = "completed"
-            elif event_type == "run.failed":
-                status_text = "failed"
+        events = sanitize_run_events(events)
+        status_text, final_message = summarize_run_events(events)
         return {
             "run_id": run_id,
             "status": status_text,
@@ -136,42 +144,22 @@ class DedicatedHermesBackend:
             return payload
         return {"ok": True, "session_key": session_key}
 
-    async def upload_file(self, ctx: RuntimeContext, file: UploadFile) -> dict:
+    async def upload_file(
+        self,
+        ctx: RuntimeContext,
+        file: UploadFile,
+        target_dir: str | None = None,
+    ) -> dict:
         async with async_session() as db:
             container = await ensure_running(db, ctx.user.id)
 
-        contents = await file.read()
-        filename = file.filename or "upload.bin"
-        stored_name = f"{int(time.time() * 1000)}-{filename}"
-        relative_path = f"workspace/uploads/{stored_name}"
-
-        tar_buffer = io.BytesIO()
-        with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
-            uploads_dir = tarfile.TarInfo(name="workspace/uploads")
-            uploads_dir.type = tarfile.DIRTYPE
-            uploads_dir.mode = 0o755
-            uploads_dir.mtime = int(time.time())
-            tar.addfile(uploads_dir)
-
-            upload_file = tarfile.TarInfo(name=relative_path)
-            upload_file.size = len(contents)
-            upload_file.mode = 0o644
-            upload_file.mtime = int(time.time())
-            tar.addfile(upload_file, io.BytesIO(contents))
-
-        tar_buffer.seek(0)
-        ok = container.put_archive("/", tar_buffer.read())
-        if not ok:
-            raise HTTPException(status_code=500, detail="Failed to write upload into Hermes workspace")
-
-        return {
-            "path": f"/workspace/uploads/{stored_name}",
-            "name": stored_name,
-            "original_name": filename,
-            "size": len(contents),
-            "content_type": file.content_type or "application/octet-stream",
-            "url": f"/api/openclaw/filemanager/serve?path=/workspace/uploads/{stored_name}",
-        }
+        payload = await write_upload_to_hermes_container(
+            container.docker_id,
+            file,
+            target_dir or DEFAULT_HERMES_UPLOAD_DIR,
+        )
+        payload["url"] = f"/api/openclaw/filemanager/serve?path=/{payload['path']}"
+        return payload
 
     def _map_event_to_compat_block(self, event: dict[str, Any]) -> str | None:
         event_type = str(event.get("type", ""))
@@ -194,6 +182,7 @@ class DedicatedHermesBackend:
             message = event.get("message")
             if not isinstance(message, dict):
                 return None
+            message = sanitize_hermes_message(message)
             payload = {
                 "event": "chat",
                 "payload": {
@@ -230,6 +219,7 @@ class DedicatedHermesBackend:
         target_url = f"{base_url}/api/hermes/events/stream"
 
         async def _stream_sse():
+            sanitizer = HermesEventSanitizer()
             async with httpx.AsyncClient(timeout=None) as client:
                 try:
                     async with client.stream("GET", target_url) as resp:
@@ -251,6 +241,9 @@ class DedicatedHermesBackend:
                                 except json.JSONDecodeError:
                                     continue
                                 if not isinstance(event, dict):
+                                    continue
+                                event = sanitizer.sanitize_event(event)
+                                if event is None:
                                     continue
                                 mapped = self._map_event_to_compat_block(event)
                                 if mapped:
@@ -281,16 +274,23 @@ class DedicatedHermesBackend:
             headers["Authorization"] = f"Bearer {settings.dedicated_hermes_api_key}"
 
         async def _stream_sse():
+            sanitizer = HermesEventSanitizer()
             async with httpx.AsyncClient(timeout=None) as client:
                 try:
                     async with client.stream("GET", target_url, headers=headers) as resp:
                         if resp.status_code >= 400:
                             yield b'data: {"event":"run.failed","error":"dedicated hermes upstream error"}\n\n'
                             return
+                        buffer = ""
                         async for chunk in resp.aiter_bytes():
                             if await request.is_disconnected():
                                 break
-                            yield chunk
+                            buffer += chunk.decode("utf-8", errors="ignore")
+                            while "\n\n" in buffer:
+                                block, buffer = buffer.split("\n\n", 1)
+                                sanitized = sanitize_sse_block(block, sanitizer)
+                                if sanitized:
+                                    yield sanitized.encode("utf-8")
                 except (httpx.ConnectError, httpx.RemoteProtocolError):
                     yield b'data: {"event":"run.failed","error":"dedicated hermes upstream disconnected"}\n\n'
 

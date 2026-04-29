@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -8,12 +9,21 @@ from fastapi import HTTPException, status
 
 
 class HermesClient:
-    def __init__(self, base_url: str, timeout: float = 120.0, api_key: str = ""):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 120.0,
+        api_key: str = "",
+        connect_retries: int = 0,
+        retry_delay_seconds: float = 0.25,
+    ):
         if not base_url:
             raise ValueError("Hermes base URL is not configured")
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.api_key = api_key.strip()
+        self.connect_retries = max(0, connect_retries)
+        self.retry_delay_seconds = max(0.0, retry_delay_seconds)
 
     def _auth_headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -27,14 +37,24 @@ class HermesClient:
             headers.update(kwargs["headers"])
         if headers:
             kwargs["headers"] = headers
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                response = await client.request(method, f"{self.base_url}{path}", **kwargs)
-            except httpx.ConnectError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Hermes runtime is unavailable",
-                ) from exc
+        for attempt in range(self.connect_retries + 1):
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                try:
+                    response = await client.request(method, f"{self.base_url}{path}", **kwargs)
+                    break
+                except httpx.ConnectError as exc:
+                    if attempt < self.connect_retries:
+                        await asyncio.sleep(self.retry_delay_seconds)
+                        continue
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Hermes runtime is unavailable",
+                    ) from exc
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hermes runtime is unavailable",
+            )
 
         payload: Any
         try:

@@ -3,7 +3,6 @@ import types
 
 from app.config import Settings
 
-
 if "docker" not in sys.modules:
     docker_stub = types.ModuleType("docker")
     docker_stub.DockerClient = object
@@ -68,6 +67,7 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     monkeypatch.setattr(manager.settings, "dedicated_hermes_api_key", "bridge-key")
     monkeypatch.setattr(manager.settings, "dedicated_hermes_default_api_key", "proxy-key")
     monkeypatch.setattr(manager.settings, "default_model", "claude-sonnet-4-5")
+    monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "none")
     monkeypatch.setattr(manager.settings, "container_tz", "Asia/Shanghai")
 
     env = manager._runtime_environment("container-token", "sso-token")
@@ -82,6 +82,7 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     assert env["API_SERVER_KEY"] == "bridge-key"
     assert env["GATEWAY_ALLOW_ALL_USERS"] == "true"
     assert env["OPENAI_API_KEY"] == "proxy-key"
+    assert env["HERMES_API_TOOLSETS"] == "none"
     assert env["INFOX_MED_TOKEN"] == "sso-token"
     assert "BRIDGE_ENABLE_CHANNELS" not in env
 
@@ -92,6 +93,7 @@ def test_build_hermes_runtime_files_support_platform_default_model(monkeypatch):
     monkeypatch.setattr(manager.settings, "dedicated_hermes_default_base_url", "http://gateway:8080/llm/v1")
     monkeypatch.setattr(manager.settings, "dedicated_hermes_api_key", "bridge-key")
     monkeypatch.setattr(manager.settings, "dedicated_hermes_default_api_key", "proxy-key")
+    monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "none")
 
     config_yaml = manager._build_hermes_config_yaml()
     env_file = manager._build_hermes_env_file()
@@ -99,9 +101,22 @@ def test_build_hermes_runtime_files_support_platform_default_model(monkeypatch):
     assert 'default: claude-sonnet-4-5' in config_yaml
     assert 'provider: custom' in config_yaml
     assert 'base_url: http://gateway:8080/llm/v1' in config_yaml
+    assert 'platform_toolsets:' in config_yaml
+    assert 'api_server: []' in config_yaml
     assert 'API_SERVER_KEY=bridge-key' in env_file
     assert 'GATEWAY_ALLOW_ALL_USERS=true' in env_file
     assert 'OPENAI_API_KEY=proxy-key' in env_file
+    assert 'HERMES_API_TOOLSETS=none' in env_file
+
+
+def test_hermes_api_toolsets_support_skills_and_full_modes(monkeypatch):
+    monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "skills")
+    config_yaml = manager._build_hermes_config_yaml()
+    assert "- skills" in config_yaml
+
+    monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "full")
+    config_yaml = manager._build_hermes_config_yaml()
+    assert "- hermes-api-server" in config_yaml
 
 
 def test_published_port_bindings_follow_runtime_backend(monkeypatch):

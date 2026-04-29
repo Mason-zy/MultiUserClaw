@@ -36,6 +36,15 @@ class SharedOpenClawBackend(RuntimeBackend):
             "status": shared_ctx.binding.status,
         }
 
+    async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
+        _ = ctx
+        payload = await shared_runtime_request("GET", "/api/skills")
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict) and isinstance(payload.get("skills"), list):
+            return [item for item in payload["skills"] if isinstance(item, dict)]
+        return []
+
     async def list_sessions(self, ctx: RuntimeContext) -> list[dict]:
         async with async_session() as db:
             shared_ctx = await self._context_for_user(db, ctx.user)
@@ -79,7 +88,12 @@ class SharedOpenClawBackend(RuntimeBackend):
         key = ensure_session_owned(shared_ctx, session_key)
         return await shared_runtime_request("DELETE", f"/api/sessions/{key}")
 
-    async def upload_file(self, ctx: RuntimeContext, file: UploadFile) -> dict:
+    async def upload_file(
+        self,
+        ctx: RuntimeContext,
+        file: UploadFile,
+        target_dir: str | None = None,
+    ) -> dict:
         async with async_session() as db:
             shared_ctx = await self._context_for_user(db, ctx.user)
         return await upload_file_to_shared_workspace(shared_ctx, file)

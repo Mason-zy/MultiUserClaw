@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 from fastapi import HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 
@@ -8,9 +9,6 @@ from app.config import settings
 from app.container.manager import ensure_running
 from app.db.engine import async_session
 from app.runtime_backend import RuntimeBackend, RuntimeContext
-from app.shared_runtime import shared_runtime_request
-
-import httpx
 
 
 class DedicatedOpenClawBackend(RuntimeBackend):
@@ -50,6 +48,14 @@ class DedicatedOpenClawBackend(RuntimeBackend):
             return {"agents": payload}
         return {"agents": []}
 
+    async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
+        payload = await self._request(ctx, "GET", "/api/skills")
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict) and isinstance(payload.get("skills"), list):
+            return [item for item in payload["skills"] if isinstance(item, dict)]
+        return []
+
     async def list_sessions(self, ctx: RuntimeContext) -> list[dict]:
         payload = await self._request(ctx, "GET", "/api/sessions")
         return payload if isinstance(payload, list) else []
@@ -70,13 +76,27 @@ class DedicatedOpenClawBackend(RuntimeBackend):
     async def delete_session(self, ctx: RuntimeContext, session_key: str):
         return await self._request(ctx, "DELETE", f"/api/sessions/{session_key}")
 
-    async def upload_file(self, ctx: RuntimeContext, file: UploadFile) -> dict:
+    async def upload_file(
+        self,
+        ctx: RuntimeContext,
+        file: UploadFile,
+        target_dir: str | None = None,
+    ) -> dict:
         contents = await file.read()
+        files = {
+            "file": (
+                file.filename or "upload.bin",
+                contents,
+                file.content_type or "application/octet-stream",
+            )
+        }
+        if target_dir:
+            files["path"] = (None, target_dir)
         payload = await self._request(
             ctx,
             "POST",
             "/api/filemanager/upload",
-            files={"file": (file.filename or "upload.bin", contents, file.content_type or "application/octet-stream")},
+            files=files,
         )
         if not isinstance(payload, dict):
             raise HTTPException(status_code=500, detail="Unexpected upload response from dedicated OpenClaw")

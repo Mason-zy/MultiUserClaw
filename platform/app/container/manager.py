@@ -7,12 +7,11 @@ import json
 import secrets
 import tarfile
 import time
-from pathlib import Path
-
-import yaml
 
 import docker
-from docker.errors import APIError as DockerAPIError, NotFound as DockerNotFound
+import yaml
+from docker.errors import APIError as DockerAPIError
+from docker.errors import NotFound as DockerNotFound
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +27,10 @@ def _docker() -> docker.DockerClient:
     if _client is None:
         _client = docker.from_env()
     return _client
+
+
+def get_docker_container(container_id_or_name: str) -> docker.models.containers.Container:
+    return _docker().containers.get(container_id_or_name)
 
 
 def _ensure_network() -> None:
@@ -106,7 +109,7 @@ def _runtime_command() -> list[str]:
 
 def _runtime_environment(container_token: str, sso_token: str | None) -> dict[str, str]:
     env = {
-        "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
+        "NANOBOT_PROXY__URL": "http://gateway:8080/llm/v1",
         "NANOBOT_PROXY__TOKEN": container_token,
         "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
         "TZ": settings.container_tz,
@@ -123,6 +126,7 @@ def _runtime_environment(container_token: str, sso_token: str | None) -> dict[st
                 "API_SERVER_KEY": settings.dedicated_hermes_api_key,
                 "GATEWAY_ALLOW_ALL_USERS": "true",
                 "OPENAI_API_KEY": settings.dedicated_hermes_default_api_key,
+                "HERMES_API_TOOLSETS": settings.hermes_api_toolsets,
             }
         )
     if sso_token:
@@ -176,14 +180,27 @@ def _build_hermes_config_yaml() -> str:
             "provider": settings.dedicated_hermes_default_provider,
             "base_url": settings.dedicated_hermes_default_base_url,
         },
+        "platform_toolsets": {
+            "api_server": _hermes_api_toolsets(),
+        },
     }
     return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
+
+
+def _hermes_api_toolsets() -> list[str]:
+    raw = (settings.hermes_api_toolsets or "").strip()
+    if not raw or raw.lower() in {"none", "off", "false", "0"}:
+        return []
+    if raw.lower() in {"full", "default", "hermes-api-server"}:
+        return ["hermes-api-server"]
+    return [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
 
 
 def _build_hermes_env_file() -> str:
     lines = [
         f"API_SERVER_KEY={settings.dedicated_hermes_api_key}",
         "GATEWAY_ALLOW_ALL_USERS=true",
+        f"HERMES_API_TOOLSETS={settings.hermes_api_toolsets}",
     ]
     default_api_key = (settings.dedicated_hermes_default_api_key or "").strip()
     if default_api_key:
@@ -653,12 +670,12 @@ async def resume_container(db: AsyncSession, user_id: str) -> bool:
     client = _docker()
     try:
         c = client.containers.get(record.docker_id)
-        
+
         if record.status == "paused":
             c.unpause()
         elif record.status == "stopped":
             c.start()
-        
+
         # Reload to get latest status
         c.reload()
         await db.execute(

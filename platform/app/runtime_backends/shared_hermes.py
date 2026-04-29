@@ -13,17 +13,29 @@ from app.db.engine import async_session
 from app.db.models import User
 from app.hermes_client import HermesClient
 from app.runtime_backend import RuntimeBackend, RuntimeContext
+from app.runtime_backends.hermes_files import (
+    SHARED_HERMES_CONTAINER_NAME,
+    write_upload_to_hermes_container,
+)
+from app.runtime_backends.hermes_run import (
+    HermesEventSanitizer,
+    sanitize_hermes_message,
+    sanitize_hermes_messages,
+    sanitize_run_events,
+    sanitize_sse_block,
+    summarize_run_events,
+)
+from app.runtime_backends.hermes_skills import list_skills_from_hermes_container
 from app.shared_runtime import (
     build_session_key,
     ensure_session_owned,
     ensure_shared_agent_binding,
-    upload_file_to_shared_workspace,
 )
 
 
 class SharedHermesBackend(RuntimeBackend):
     async def _context_for_user(self, db: AsyncSession, user: User):
-        return await ensure_shared_agent_binding(db, user)
+        return await ensure_shared_agent_binding(db, user, provision_openclaw_agent=False)
 
     def _base_url(self) -> str:
         base_url = (settings.shared_hermes_url or settings.shared_openclaw_url).rstrip("/")
@@ -35,10 +47,21 @@ class SharedHermesBackend(RuntimeBackend):
         return base_url
 
     def _client(self) -> HermesClient:
-        return HermesClient(base_url=self._base_url(), timeout=settings.shared_openclaw_timeout_seconds)
+        return HermesClient(
+            base_url=self._base_url(),
+            api_key=settings.shared_hermes_api_key,
+            timeout=settings.shared_openclaw_timeout_seconds,
+            connect_retries=settings.hermes_connect_retries,
+            retry_delay_seconds=settings.hermes_retry_delay_seconds,
+        )
 
     async def _request(self, method: str, path: str, **kwargs):
         return await self._client().request(method, path, **kwargs)
+
+    def _auth_headers(self) -> dict[str, str]:
+        if not settings.shared_hermes_api_key:
+            return {}
+        return {"Authorization": f"Bearer {settings.shared_hermes_api_key}"}
 
     def _session_summary(self, payload: dict) -> dict:
         message_count = payload.get("message_count")
@@ -52,6 +75,7 @@ class SharedHermesBackend(RuntimeBackend):
         }
 
     async def get_agent_info(self, ctx: RuntimeContext) -> dict:
+        self._base_url()
         async with async_session() as db:
             shared_ctx = await self._context_for_user(db, ctx.user)
         payload = await self._client().get_models()
@@ -65,6 +89,10 @@ class SharedHermesBackend(RuntimeBackend):
             "defaultId": shared_ctx.binding.openclaw_agent_id,
             "runtime_mode": ctx.user.runtime_mode,
         }
+
+    async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
+        _ = ctx
+        return list_skills_from_hermes_container(SHARED_HERMES_CONTAINER_NAME)
 
     async def list_sessions(self, ctx: RuntimeContext) -> list[dict]:
         async with async_session() as db:
@@ -89,6 +117,7 @@ class SharedHermesBackend(RuntimeBackend):
         messages = payload.get("messages")
         if not isinstance(messages, list):
             messages = []
+        messages = sanitize_hermes_messages(messages)
         return {
             "key": payload.get("session_id", key),
             "sessionKey": payload.get("session_id", key),
@@ -115,18 +144,8 @@ class SharedHermesBackend(RuntimeBackend):
 
     async def wait_run(self, ctx: RuntimeContext, run_id: str, timeout_ms: int):
         events = await self._client().collect_run_events(run_id, timeout_ms=timeout_ms)
-        final_message = {}
-        status_text = "pending"
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            event_type = event.get("type")
-            if event_type == "message.completed" and isinstance(event.get("message"), dict):
-                final_message = event["message"]
-            if event_type == "run.completed":
-                status_text = "completed"
-            elif event_type == "run.failed":
-                status_text = "failed"
+        events = sanitize_run_events(events)
+        status_text, final_message = summarize_run_events(events)
         return {
             "run_id": run_id,
             "status": status_text,
@@ -152,10 +171,19 @@ class SharedHermesBackend(RuntimeBackend):
             return payload
         return {"ok": True, "session_key": key}
 
-    async def upload_file(self, ctx: RuntimeContext, file: UploadFile) -> dict:
+    async def upload_file(
+        self,
+        ctx: RuntimeContext,
+        file: UploadFile,
+        target_dir: str | None = None,
+    ) -> dict:
         async with async_session() as db:
             shared_ctx = await self._context_for_user(db, ctx.user)
-        return await upload_file_to_shared_workspace(shared_ctx, file)
+        return await write_upload_to_hermes_container(
+            SHARED_HERMES_CONTAINER_NAME,
+            file,
+            shared_ctx.upload_dir,
+        )
 
     def _map_event_to_compat_block(self, event: dict) -> str | None:
         event_type = str(event.get("type", ""))
@@ -178,6 +206,7 @@ class SharedHermesBackend(RuntimeBackend):
             message = event.get("message")
             if not isinstance(message, dict):
                 return None
+            message = sanitize_hermes_message(message)
             payload = {
                 "event": "chat",
                 "payload": {
@@ -213,9 +242,10 @@ class SharedHermesBackend(RuntimeBackend):
         target_url = f"{self._base_url()}/api/hermes/events/stream"
 
         async def _stream_sse():
+            sanitizer = HermesEventSanitizer()
             async with httpx.AsyncClient(timeout=None) as client:
                 try:
-                    async with client.stream("GET", target_url) as resp:
+                    async with client.stream("GET", target_url, headers=self._auth_headers()) as resp:
                         if resp.status_code >= 400:
                             yield b'data: {"error":"shared hermes upstream error"}\n\n'
                             return
@@ -240,6 +270,9 @@ class SharedHermesBackend(RuntimeBackend):
                                         continue
                                     session_key = event.get("session_id") or event.get("session_key")
                                     if session_key and str(session_key).startswith(shared_ctx.session_prefix):
+                                        event = sanitizer.sanitize_event(event)
+                                        if event is None:
+                                            continue
                                         mapped = self._map_event_to_compat_block(event)
                                         if mapped:
                                             yield mapped.encode("utf-8")
@@ -266,16 +299,23 @@ class SharedHermesBackend(RuntimeBackend):
         target_url = f"{self._base_url()}/v1/runs/{run_id}/events"
 
         async def _stream_sse():
+            sanitizer = HermesEventSanitizer()
             async with httpx.AsyncClient(timeout=None) as client:
                 try:
-                    async with client.stream("GET", target_url) as resp:
+                    async with client.stream("GET", target_url, headers=self._auth_headers()) as resp:
                         if resp.status_code >= 400:
                             yield b'data: {"event":"run.failed","error":"shared hermes upstream error"}\n\n'
                             return
+                        buffer = ""
                         async for chunk in resp.aiter_bytes():
                             if await request.is_disconnected():
                                 break
-                            yield chunk
+                            buffer += chunk.decode("utf-8", errors="ignore")
+                            while "\n\n" in buffer:
+                                block, buffer = buffer.split("\n\n", 1)
+                                sanitized = sanitize_sse_block(block, sanitizer)
+                                if sanitized:
+                                    yield sanitized.encode("utf-8")
                 except (httpx.ConnectError, httpx.RemoteProtocolError):
                     yield b'data: {"event":"run.failed","error":"shared hermes upstream disconnected"}\n\n'
 

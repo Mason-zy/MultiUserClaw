@@ -118,7 +118,12 @@ def build_session_key(agent_id: str) -> str:
     return f"agent:{agent_id}:session-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
 
 
-async def ensure_shared_agent_binding(db: AsyncSession, user: User) -> SharedAgentContext:
+async def ensure_shared_agent_binding(
+    db: AsyncSession,
+    user: User,
+    *,
+    provision_openclaw_agent: bool = True,
+) -> SharedAgentContext:
     await ensure_shared_mode_enabled()
     await require_shared_user(user)
 
@@ -129,7 +134,8 @@ async def ensure_shared_agent_binding(db: AsyncSession, user: User) -> SharedAge
     if binding is None:
         agent_id = build_shared_agent_id(user.id)
         workspace_dir = f"~/.openclaw/workspace-{agent_id}"
-        await create_shared_agent(agent_id, workspace_dir, user.username)
+        if provision_openclaw_agent:
+            await create_shared_agent(agent_id, workspace_dir, user.username)
         binding = SharedAgentBinding(
             user_id=user.id,
             openclaw_agent_id=agent_id,
