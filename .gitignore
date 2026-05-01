@@ -58,6 +58,7 @@ cache
 .parquet
 .claude
 .claude/settings.local.json
+.codex/
 docs
 openclaw/bridge-deploy-copy
 openclaw/dist-runtime
