@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState } from 'react'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import {
   Bot,
   Compass,
@@ -9,8 +9,8 @@ import {
   Presentation,
 } from 'lucide-react'
 import AgentCreatePanel from '../components/AgentCreatePanel.tsx'
-import { listAgents } from '../lib/api.ts'
 import type { AgentInfo } from '../lib/api.ts'
+import type { LayoutOutletContext } from '../components/Layout.tsx'
 
 const builtInAgentIds = new Set([
   'daily-assistant',
@@ -48,16 +48,22 @@ function getAgentName(agent: AgentInfo): string {
   return agent.identity?.name || agent.name || agent.id
 }
 
+function AgentCardSkeleton() {
+  return (
+    <div className="workspace-card flex min-h-[86px] items-center gap-4 rounded-lg border border-light-border bg-light-card-hover px-5 py-4">
+      <span className="skeleton-shimmer h-8 w-8 shrink-0 rounded-xl" />
+      <span className="min-w-0 flex-1 space-y-2">
+        <span className="skeleton-shimmer block h-4 w-2/3 rounded-full" />
+        <span className="skeleton-shimmer block h-3 w-full rounded-full" />
+      </span>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const navigate = useNavigate()
+  const { agents, agentsLoading, refreshAgents } = useOutletContext<LayoutOutletContext>()
   const [agentPanelOpen, setAgentPanelOpen] = useState(false)
-  const [agents, setAgents] = useState<AgentInfo[]>([])
-
-  useEffect(() => {
-    listAgents()
-      .then(result => setAgents(result.agents || []))
-      .catch(() => setAgents([]))
-  }, [])
 
   const builtInAgents = agents.filter(agent => builtInAgentIds.has(agent.id))
   const customAgents = agents.filter(
@@ -89,18 +95,9 @@ export default function Dashboard() {
         </section>
 
         <section className="mt-12 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          <button
-            type="button"
-            onClick={() => setAgentPanelOpen(true)}
-            className="workspace-card flex min-h-[86px] cursor-pointer items-center gap-4 rounded-lg border border-accent-blue/30 bg-accent-blue/5 px-5 py-4 text-left transition-colors hover:bg-accent-blue/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
-          >
-            <Bot size={32} strokeWidth={2} className="shrink-0 text-accent-blue" />
-            <span className="min-w-0">
-              <span className="block truncate text-sm font-semibold text-light-text">创建专属 Agent</span>
-              <span className="mt-1 block truncate text-xs text-light-text-secondary">为固定任务定制一个可复用助手</span>
-            </span>
-          </button>
-          {builtInAgents.map(agent => {
+          {agentsLoading ? (
+            Array.from({ length: 6 }).map((_, index) => <AgentCardSkeleton key={index} />)
+          ) : builtInAgents.map(agent => {
             const meta = agentMeta[agent.id] || { description: '开始一个新的 Agent 对话', icon: Bot }
             const Icon = meta.icon
             return (
@@ -118,7 +115,7 @@ export default function Dashboard() {
             </button>
             )
           })}
-          {customAgents.map(agent => (
+          {!agentsLoading && customAgents.map(agent => (
             <button
               key={agent.id}
               type="button"
@@ -137,11 +134,12 @@ export default function Dashboard() {
       <AgentCreatePanel
         open={agentPanelOpen}
         onClose={() => setAgentPanelOpen(false)}
-        onCreated={(agentId, displayName) =>
+        onCreated={async (agentId, displayName) => {
+          await refreshAgents({ force: true })
           navigate(
             `/chat?new=1&agent=${encodeURIComponent(agentId)}&createdAgent=${encodeURIComponent(displayName)}`,
           )
-        }
+        }}
       />
     </div>
   )

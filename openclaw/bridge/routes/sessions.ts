@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { BridgeGatewayClient } from "../gateway-client.js";
 import { randomUUID } from "node:crypto";
 import { asyncHandler, toOpenclawSessionKey, toNanobotSessionId, extractTextContent, stripInboundMetadata, cleanSessionTitle } from "../utils.js";
+import { loadConfig } from "../config.js";
 
 interface OpenclawSessionRow {
   key: string;
@@ -22,6 +23,79 @@ interface OpenclawChatHistoryResult {
     [key: string]: unknown;
   }>;
   [key: string]: unknown;
+}
+
+function compactFallbackTitle(message: string): string {
+  const compact = message
+    .replace(/[*_`#>\[\]()]/g, "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!compact) return "新对话";
+  return Array.from(compact).slice(0, 24).join("");
+}
+
+function normalizeGeneratedTitle(value: string): string {
+  const firstLine = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+  const cleaned = firstLine
+    .replace(/^["'“”‘’「」《》]+|["'“”‘’「」《》。.!！?？]+$/g, "")
+    .replace(/^标题[:：]\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return Array.from(cleaned).slice(0, 24).join("");
+}
+
+async function generateSessionTitle(message: string): Promise<string> {
+  const fallback = compactFallbackTitle(message);
+  const config = loadConfig();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+
+  try {
+    const response = await fetch(`${config.proxyUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.proxyToken}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        temperature: 0.2,
+        max_tokens: 32,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "你是对话标题生成器。",
+              "请只根据用户第一条消息概括其真实意图和要求。",
+              "输出一个中文短标题，8到18个汉字为宜，最多24个汉字。",
+              "不要使用引号、句号、编号、解释、Markdown。",
+              "不要根据助手回答内容生成标题。",
+              "如果用户只是在询问某个助手能做什么，也要说明具体对象，例如“询问演示文稿助手能力”。",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: message,
+          },
+        ],
+      }),
+    });
+    if (!response.ok) return fallback;
+    const data = await response.json() as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    return normalizeGeneratedTitle(data.choices?.[0]?.message?.content || "") || fallback;
+  } catch {
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Convert "agent:programmer:session-1773503840989" → "programmer 会话" */
@@ -120,6 +194,7 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
   router.post("/sessions/:key(*)/messages", asyncHandler(async (req, res) => {
     const key = toOpenclawSessionKey(req.params.key);
     const { message } = req.body;
+    const titleSource = typeof req.body?.titleSource === "string" ? req.body.titleSource.trim() : "";
 
     if (!message || typeof message !== "string") {
       res.status(400).json({ detail: "message is required" });
@@ -127,6 +202,10 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
     }
 
     try {
+      const historyPromise = client.request<OpenclawChatHistoryResult>("chat.history", {
+        sessionKey: key,
+        limit: 5,
+      }).catch(() => ({ messages: [] }));
       const params: Record<string, unknown> = {
         sessionKey: key,
         message,
@@ -134,8 +213,22 @@ export function sessionsRoutes(client: BridgeGatewayClient): Router {
         idempotencyKey: randomUUID(),
       };
 
-      const result = await client.request<Record<string, unknown>>("chat.send", params);
-      res.json({ ok: true, runId: result.runId || null });
+      const history = await historyPromise;
+      const hasExistingUserMessage = (history.messages || []).some((m) => m.role === "user");
+      const titlePromise = hasExistingUserMessage ? Promise.resolve<string | null>(null) : generateSessionTitle(titleSource || message);
+      const [result, title] = await Promise.all([
+        client.request<Record<string, unknown>>("chat.send", params),
+        titlePromise,
+      ]);
+
+      if (title) {
+        await client.request("sessions.patch", {
+          key,
+          label: title,
+        }).catch(() => {});
+      }
+
+      res.json({ ok: true, runId: result.runId || null, title });
     } catch (err) {
       res.status(500).json({ detail: (err as Error).message });
     }

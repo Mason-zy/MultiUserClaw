@@ -123,6 +123,26 @@ body {
   animation: slideInRight 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+.skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--color-light-border) 54%, transparent);
+}
+
+.skeleton-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-light-card) 72%, transparent),
+    transparent
+  );
+  animation: skeletonShimmer 1.35s ease-in-out infinite;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
 }
@@ -142,6 +162,10 @@ body {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes skeletonShimmer {
+  100% { transform: translateX(100%); }
 }
 
 @keyframes loginGridDrift {
@@ -226,6 +250,7 @@ select:-webkit-autofill {
   .login-bg-grid,
   .login-bg-flow,
   .animate-fade-in,
+  .skeleton-shimmer::after,
   .agent-panel,
   .agent-panel-backdrop {
     animation: none;

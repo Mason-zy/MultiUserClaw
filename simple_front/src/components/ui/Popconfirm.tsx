@@ -23,7 +23,7 @@ export default function Popconfirm({
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const ref = useRef<HTMLSpanElement>(null)
   const panelWidth = 256
-  const estimatedPanelHeight = description ? 154 : 126
+  const estimatedPanelHeight = description ? 164 : 126
 
   const updatePosition = useCallback(() => {
     const trigger = ref.current
@@ -86,13 +86,15 @@ export default function Popconfirm({
       {open && (
         <span
           style={{ top: position.top, left: position.left }}
-          className="fixed z-[90] w-64 rounded-xl border border-light-border bg-white p-3 text-left shadow-xl shadow-slate-200/80"
+          className="fixed z-[90] flex max-h-[min(320px,calc(100vh-16px))] w-64 flex-col rounded-xl border border-light-border bg-white p-3 text-left shadow-xl shadow-slate-200/80"
         >
-          <span className="block text-sm font-medium text-light-text">{title}</span>
+          <span className="block shrink-0 text-sm font-medium text-light-text">{title}</span>
           {description && (
-            <span className="mt-1 block text-xs leading-5 text-light-text-secondary">{description}</span>
+            <span className="mt-1 block min-h-0 overflow-y-auto break-words text-xs leading-5 text-light-text-secondary">
+              {description}
+            </span>
           )}
-          <span className="mt-3 flex justify-end gap-2">
+          <span className="mt-3 flex shrink-0 justify-end gap-2">
             <button
               type="button"
               onClick={() => setOpen(false)}

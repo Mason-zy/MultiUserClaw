@@ -8,13 +8,13 @@ import {
   Bot,
   Search,
   RefreshCw,
-  ChevronRight,
   ChevronDown,
   Copy,
   Check,
   X,
   FileText,
   Menu,
+  Square,
 } from 'lucide-react'
 import MarkdownContent from '../components/MarkdownContent.tsx'
 import UserAvatar from '../components/UserAvatar.tsx'
@@ -28,11 +28,12 @@ import {
   getSession,
   sendChatMessage,
   waitForAgentRun,
-  listAgents,
+  abortAgentRun,
+  abortActiveSessionRun,
   getAccessToken,
   uploadFileToWorkspace,
 } from '../lib/api.ts'
-import type { SessionDetail, AgentInfo } from '../lib/api.ts'
+import type { Session, SessionDetail, AgentInfo } from '../lib/api.ts'
 
 /**
  * Extract agentId from session key.
@@ -76,6 +77,27 @@ function normalizeSessionKey(key: string): string {
   return key.replace(/:/g, '')
 }
 
+function buildFallbackTitleFromText(text: string, fileCount = 0): string {
+  const compact = text.replace(/\s+/g, ' ').trim()
+  if (compact) return Array.from(compact).slice(0, 24).join('')
+  if (fileCount > 0) return fileCount === 1 ? '处理附件' : `处理 ${fileCount} 个附件`
+  return '新对话'
+}
+
+function buildTitleFromMessages(messages: SessionDetail['messages']): string {
+  const firstUserMessage = messages.find(msg => msg.role === 'user' && msg.content.trim())
+  if (!firstUserMessage) return ''
+  return buildFallbackTitleFromText(firstUserMessage.content)
+}
+
+function hasAssistantAfterLastUser(messages: SessionDetail['messages']): boolean {
+  const lastUserIndex = messages.map(msg => msg.role).lastIndexOf('user')
+  if (lastUserIndex < 0) return messages.some(msg => msg.role === 'assistant' && msg.content.trim())
+  return messages
+    .slice(lastUserIndex + 1)
+    .some(msg => msg.role === 'assistant' && msg.content.trim())
+}
+
 const retiredBuiltInAgentIds = new Set(['manager', 'programmer', 'researcher', 'hr', 'doctor'])
 const agentDescriptions: Record<string, string> = {
   'daily-assistant': '整理待办、规划下一步、跟进日常事项',
@@ -87,7 +109,15 @@ const agentDescriptions: Record<string, string> = {
 
 export default function Chat() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const { user, refreshSessions, openMobileSidebar } = useOutletContext<LayoutOutletContext>()
+  const {
+    user,
+    agents,
+    currentSessionTitle,
+    refreshAgents,
+    refreshSessions,
+    addOptimisticSession,
+    openMobileSidebar,
+  } = useOutletContext<LayoutOutletContext>()
 
   // Sessions
   const [activeSessionKey, setActiveSessionKey] = useState<string | null>(null)
@@ -103,8 +133,11 @@ export default function Chat() {
   const targetTextBySessionRef = useRef<Record<string, string>>({})
   const typewriterTimersRef = useRef<Record<string, ReturnType<typeof setInterval>>>({})
   const sendingBySessionRef = useRef<Record<string, boolean>>({})
+  const runIdBySessionRef = useRef<Record<string, string>>({})
+  const abortedSessionRef = useRef<Record<string, boolean>>({})
   const sseCompletedRef = useRef<Record<string, boolean>>({})
   const sseFinalTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const sessionMessagesCacheRef = useRef<Record<string, SessionDetail['messages']>>({})
 
   const setSendingForSession = useCallback((key: string, value: boolean) => {
     setSendingBySession(prev => {
@@ -133,6 +166,16 @@ export default function Chat() {
     }
   }, [])
 
+  const setRunIdForSession = useCallback((key: string, runId: string | null) => {
+    const next = { ...runIdBySessionRef.current }
+    if (runId) {
+      next[key] = runId
+    } else {
+      delete next[key]
+    }
+    runIdBySessionRef.current = next
+  }, [])
+
   const setStreamingText = useCallback((key: string, text: string) => {
     if (!text) {
       clearStreamingText(key)
@@ -159,7 +202,19 @@ export default function Chat() {
     }
   }, [clearStreamingText])
 
-  const [agents, setAgents] = useState<AgentInfo[]>([])
+  const applyLoadedMessages = useCallback((key: string, nextMessages: SessionDetail['messages']) => {
+    if (nextMessages.length > 0) {
+      sessionMessagesCacheRef.current[key] = nextMessages
+    }
+    if (activeSessionKeyRef.current !== key) return
+    setMessages(prev => {
+      if (nextMessages.length === 0 && prev.length > 0) {
+        return prev
+      }
+      return nextMessages
+    })
+  }, [])
+
   const [draftAgentId, setDraftAgentId] = useState('')
   const [isDraftSession, setIsDraftSession] = useState(false)
   const [agentPickerOpen, setAgentPickerOpen] = useState(false)
@@ -194,22 +249,9 @@ export default function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
 
-  const loadAgentsCatalog = useCallback(async () => {
-    try {
-      const result = await listAgents()
-      setAgents(result.agents || [])
-    } catch {
-      setAgents([])
-    }
-  }, [])
-
   useEffect(() => {
     scrollToBottom()
   }, [messages, activeSessionKey, displayedTextBySession, scrollToBottom])
-
-  useEffect(() => {
-    loadAgentsCatalog()
-  }, [loadAgentsCatalog])
 
   useEffect(() => {
     const createdAgent = searchParams.get('createdAgent')
@@ -310,7 +352,7 @@ export default function Chat() {
     setTimeout(() => inputRef.current?.focus(), 100)
   }, [searchParams])
 
-  const loadSession = async (key: string) => {
+  const loadSession = async (key: string, options: { force?: boolean } = {}) => {
     const loadSeq = sessionLoadSeqRef.current + 1
     sessionLoadSeqRef.current = loadSeq
     setActiveSessionKey(key)
@@ -321,10 +363,16 @@ export default function Chat() {
     setChatLoading(true)
     setError('')
     setSearchParams({ session: key })
+    const cachedMessages = sessionMessagesCacheRef.current[key]
+    if (!options.force && cachedMessages) {
+      setMessages(cachedMessages)
+      setChatLoading(false)
+      return
+    }
     try {
       const detail = await getSession(key)
       if (sessionLoadSeqRef.current !== loadSeq || activeSessionKeyRef.current !== key) return
-      setMessages(detail.messages || [])
+      applyLoadedMessages(key, detail.messages || [])
     } catch (err: any) {
       if (sessionLoadSeqRef.current !== loadSeq || activeSessionKeyRef.current !== key) return
       setError(err?.message || '加载会话失败')
@@ -439,24 +487,33 @@ export default function Chat() {
       if (sseFinalTimersRef.current[eventSessionKey]) {
         clearTimeout(sseFinalTimersRef.current[eventSessionKey])
       }
-      sseFinalTimersRef.current[eventSessionKey] = setTimeout(() => {
+      sseFinalTimersRef.current[eventSessionKey] = setTimeout(async () => {
         // No new "final" events for 3s — agent is truly done
-        getSession(eventSessionKey).then(detail => {
-          if (activeSessionKeyRef.current === eventSessionKey) {
-            setMessages(detail.messages || [])
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          try {
+            const detail = await getSession(eventSessionKey)
+            const loadedMessages = detail.messages || []
+            applyLoadedMessages(eventSessionKey, loadedMessages)
+            if (hasAssistantAfterLastUser(loadedMessages) || state === 'error' || state === 'aborted') {
+              clearStreamingText(eventSessionKey)
+              setSendingForSession(eventSessionKey, false)
+              sseCompletedRef.current[eventSessionKey] = true
+              refreshSessions({ silent: true, force: true })
+              return
+            }
+          } catch {
+            // keep retrying briefly; history may lag behind the lifecycle event
           }
-          clearStreamingText(eventSessionKey)
-          setSendingForSession(eventSessionKey, false)
-          sseCompletedRef.current[eventSessionKey] = true
-          refreshSessions()
-        }).catch(() => {
-          clearStreamingText(eventSessionKey)
-          setSendingForSession(eventSessionKey, false)
-          sseCompletedRef.current[eventSessionKey] = true
-        })
+          await new Promise(resolve => setTimeout(resolve, 1000))
+        }
+
+        clearStreamingText(eventSessionKey)
+        setSendingForSession(eventSessionKey, false)
+        sseCompletedRef.current[eventSessionKey] = true
+        setError('回复暂未写入会话，请稍后刷新查看')
       }, 3000)
     }
-  }, [clearStreamingText, refreshSessions, resolveKnownSessionKey, setSendingForSession, setStreamingText])
+  }, [applyLoadedMessages, clearStreamingText, refreshSessions, resolveKnownSessionKey, setSendingForSession, setStreamingText])
 
   // Connect SSE on mount
   useEffect(() => {
@@ -512,6 +569,7 @@ export default function Chat() {
     const startTime = Date.now()
 
     while (Date.now() - startTime < maxWaitMs) {
+      if (abortedSessionRef.current[key]) return
       if (sseCompletedRef.current[key]) return
       if (runId) {
         try {
@@ -525,12 +583,18 @@ export default function Chat() {
           }
 
           const detail = await getSession(key)
-          if (key === activeSessionKeyRef.current) {
-            setMessages(detail.messages || [])
+          const loadedMessages = detail.messages || []
+          applyLoadedMessages(key, loadedMessages)
+          if (hasAssistantAfterLastUser(loadedMessages) || waitResult.status === 'error') {
+            clearStreamingText(key)
+            sseCompletedRef.current[key] = true
+            if (waitResult.status === 'error') {
+              setError('Agent 执行出错，请稍后重试')
+            }
+            return
           }
-          clearStreamingText(key)
-          sseCompletedRef.current[key] = true
-          return
+          await new Promise(r => setTimeout(r, 1200))
+          continue
         } catch {
           await new Promise(r => setTimeout(r, 1500))
           continue
@@ -543,10 +607,8 @@ export default function Chat() {
         const detail = await getSession(key)
         const msgs = detail.messages || []
         const lastMsg = msgs[msgs.length - 1]
-        if (lastMsg?.role === 'assistant' && !targetTextBySessionRef.current[key]) {
-          if (key === activeSessionKeyRef.current) {
-            setMessages(msgs)
-          }
+        if (lastMsg?.role === 'assistant' && hasAssistantAfterLastUser(msgs) && !targetTextBySessionRef.current[key]) {
+          applyLoadedMessages(key, msgs)
           clearStreamingText(key)
           sseCompletedRef.current[key] = true
           return
@@ -559,9 +621,7 @@ export default function Chat() {
     // Timeout — load final state
     try {
       const detail = await getSession(key)
-      if (key === activeSessionKeyRef.current) {
-        setMessages(detail.messages || [])
-      }
+      applyLoadedMessages(key, detail.messages || [])
     } catch {}
     clearStreamingText(key)
     sseCompletedRef.current[key] = true
@@ -569,11 +629,23 @@ export default function Chat() {
 
   const handleSend = async () => {
     const text = input.trim()
-    if ((!text && pendingFiles.length === 0) || (!activeSessionKey && !isDraftSession)) return
+    if ((!text && pendingFiles.length === 0) || (!activeSessionKeyRef.current && !isDraftSession) || chatLoading) return
 
-    const sendingSessionKey = activeSessionKey || `agent:${draftAgentId || 'main'}:session-${Date.now()}`
+    const requestedAgentId = draftAgentId || searchParams.get('agent') || 'main'
+    const sendingSessionKey = activeSessionKeyRef.current || `agent:${requestedAgentId || 'main'}:session-${Date.now()}`
     if (sendingBySession[sendingSessionKey]) return
-    if (!activeSessionKey) {
+    abortedSessionRef.current[sendingSessionKey] = false
+    let firstTurnTitle = ''
+    if (!activeSessionKeyRef.current) {
+      const now = new Date().toISOString()
+      firstTurnTitle = buildFallbackTitleFromText(text, pendingFiles.length)
+      const optimisticSession: Session = {
+        key: sendingSessionKey,
+        title: firstTurnTitle,
+        created_at: now,
+        updated_at: now,
+      }
+      addOptimisticSession(optimisticSession)
       setActiveSessionKey(sendingSessionKey)
       activeSessionKeyRef.current = sendingSessionKey
       setIsDraftSession(false)
@@ -621,7 +693,11 @@ export default function Chat() {
         content: displayParts.join('\n'),
         timestamp: new Date().toISOString(),
       }
-      setMessages(prev => [...prev, userMsg])
+      setMessages(prev => {
+        const next = [...prev, userMsg]
+        sessionMessagesCacheRef.current[sendingSessionKey] = next
+        return next
+      })
       setInput('')
       pendingFiles.forEach(pf => {
         if (pf.previewUrl) URL.revokeObjectURL(pf.previewUrl)
@@ -629,13 +705,67 @@ export default function Chat() {
       setPendingFiles([])
 
       clearStreamingText(sendingSessionKey)
-      const sendResult = await sendChatMessage(sendingSessionKey, finalMessage)
+      const titleSource = text || pendingFiles.map(file => file.name).join(' ')
+      const sendResult = await sendChatMessage(sendingSessionKey, finalMessage, titleSource)
+      if (sendResult.title) {
+        const now = new Date().toISOString()
+        addOptimisticSession({
+          key: sendingSessionKey,
+          title: sendResult.title,
+          created_at: now,
+          updated_at: now,
+        })
+      }
+      setRunIdForSession(sendingSessionKey, sendResult.runId)
+      if (abortedSessionRef.current[sendingSessionKey]) {
+        if (sendResult.runId) {
+          await abortAgentRun(sendResult.runId, sendingSessionKey)
+        } else {
+          await abortActiveSessionRun(sendingSessionKey)
+        }
+        return
+      }
       await waitForResponse(sendingSessionKey, sendResult.runId)
-      void refreshSessions()
+      void refreshSessions({ silent: true, force: true })
     } catch (err: any) {
-      setError(err?.message || '发送失败')
+      if (!abortedSessionRef.current[sendingSessionKey]) {
+        setError(err?.message || '发送失败')
+      }
     } finally {
       setSendingForSession(sendingSessionKey, false)
+      setRunIdForSession(sendingSessionKey, null)
+    }
+  }
+
+  const handleAbortCurrentRun = async () => {
+    const key = activeSessionKeyRef.current
+    if (!key || !sendingBySessionRef.current[key]) return
+
+    abortedSessionRef.current[key] = true
+    sseCompletedRef.current[key] = true
+    if (sseFinalTimersRef.current[key]) {
+      clearTimeout(sseFinalTimersRef.current[key])
+      delete sseFinalTimersRef.current[key]
+    }
+    clearStreamingText(key)
+    setSendingForSession(key, false)
+    setRunIdForSession(key, null)
+    setError('')
+
+    try {
+      const runId = runIdBySessionRef.current[key]
+      if (runId) {
+        await abortAgentRun(runId, key)
+      } else {
+        await abortActiveSessionRun(key)
+      }
+      const detail = await getSession(key).catch(() => null)
+      if (detail) {
+        applyLoadedMessages(key, detail.messages || [])
+      }
+      void refreshSessions({ silent: true, force: true })
+    } catch (err: any) {
+      setError(err?.message || '终止失败')
     }
   }
 
@@ -648,7 +778,7 @@ export default function Chat() {
 
   const handleRefresh = () => {
     if (activeSessionKey) {
-      loadSession(activeSessionKey)
+      loadSession(activeSessionKey, { force: true })
     }
   }
 
@@ -669,7 +799,7 @@ export default function Chat() {
   const handleAgentCreated = async (agentId: string, displayName: string) => {
     setAgentCreateOpen(false)
     setNotice(`已创建“${displayName}”，可以开始对话了`)
-    await loadAgentsCatalog()
+    await refreshAgents({ force: true })
     handleSelectDraftAgent(agentId)
     window.setTimeout(() => setNotice(''), 6000)
   }
@@ -701,7 +831,14 @@ export default function Chat() {
   const currentAgentId = activeSessionKey ? getAgentIdFromKey(activeSessionKey) : draftAgentId
   const selectedAgent = currentAgentId ? agentOptions.find(agent => agent.id === currentAgentId) : null
   const selectedAgentLabel =
-    selectedAgent?.identity?.name || selectedAgent?.name || currentAgentId || '选择 Agent'
+    currentAgentId === 'main'
+      ? '普通对话'
+      : selectedAgent?.identity?.name || selectedAgent?.name || currentAgentId || '选择 Agent'
+  const conversationTitle = isDraftStart
+    ? '新对话'
+    : currentSessionTitle?.trim() ||
+      buildTitleFromMessages(messages) ||
+      `${selectedAgentLabel} 对话`
   const agentQuery = agentSearch.trim().toLowerCase()
   const selectableAgents = agentOptions.filter(agent => agent.id !== 'main')
   const filteredAgents = selectableAgents.filter(agent => {
@@ -879,14 +1016,24 @@ export default function Chat() {
             </IconButton>
             {renderAgentSelector(true)}
           </div>
-          <IconButton
-            label="发送"
-            onClick={handleSend}
-            disabled={!hasContent || isCurrentSending}
-            className="h-9 w-9 rounded-full bg-slate-800 text-white hover:bg-slate-700 disabled:bg-slate-300"
-          >
-            {isCurrentSending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-          </IconButton>
+          {isCurrentSending ? (
+            <IconButton
+              label="终止回复"
+              onClick={handleAbortCurrentRun}
+              className="h-9 w-9 rounded-full bg-slate-800 text-white hover:bg-slate-700"
+            >
+              <Square size={14} fill="currentColor" />
+            </IconButton>
+          ) : (
+            <IconButton
+              label="发送"
+              onClick={handleSend}
+              disabled={!hasContent}
+              className="h-9 w-9 rounded-full bg-slate-800 text-white hover:bg-slate-700 disabled:bg-slate-300"
+            >
+              <Send size={16} />
+            </IconButton>
+          )}
         </div>
       </div>
     </div>
@@ -916,17 +1063,14 @@ export default function Chat() {
                 >
                   <Menu size={20} />
                 </IconButton>
-                <Bot size={16} className="text-accent-blue shrink-0" />
-                <span className="text-sm font-medium text-light-text truncate">
-                  {isDraftStart ? '新对话' : selectedAgentLabel}
+                <MessageSquare size={16} className="text-accent-blue shrink-0" />
+                <span className="truncate text-sm font-medium text-light-text" title={conversationTitle}>
+                  {conversationTitle}
                 </span>
-                {activeSessionKey && (
-                  <>
-                    <ChevronRight size={12} className="text-light-text-secondary shrink-0" />
-                    <span className="text-xs text-light-text-secondary truncate">
-                      {activeSessionKey.split(':').pop()}
-                    </span>
-                  </>
+                {!isDraftStart && selectedAgentLabel && (
+                  <span className="hidden shrink-0 rounded-full border border-light-border px-2 py-0.5 text-xs text-light-text-secondary sm:inline">
+                    {selectedAgentLabel}
+                  </span>
                 )}
               </div>
               {activeSessionKey && (

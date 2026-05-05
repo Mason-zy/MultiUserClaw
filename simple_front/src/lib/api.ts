@@ -44,6 +44,11 @@ export interface AgentListResult {
   agents: AgentInfo[]
 }
 
+let agentsCache: AgentListResult | null = null
+let agentsRequest: Promise<AgentListResult> | null = null
+let sessionsCache: Session[] | null = null
+let sessionsRequest: Promise<Session[]> | null = null
+
 export interface CreateAgentInput {
   agentId?: string
   displayName: string
@@ -357,8 +362,25 @@ export async function getMe(): Promise<AuthUser> {
 // Agent functions
 // ---------------------------------------------------------------------------
 
-export async function listAgents(): Promise<AgentListResult> {
-  return fetchJSON<AgentListResult>('/api/openclaw/agents')
+export async function listAgents(options: { force?: boolean } = {}): Promise<AgentListResult> {
+  if (!options.force && agentsCache) return agentsCache
+  if (!options.force && agentsRequest) return agentsRequest
+
+  agentsRequest = fetchJSON<AgentListResult>('/api/openclaw/agents')
+    .then(result => {
+      agentsCache = result
+      return result
+    })
+    .finally(() => {
+      agentsRequest = null
+    })
+
+  return agentsRequest
+}
+
+export function invalidateAgentsCache(): void {
+  agentsCache = null
+  agentsRequest = null
 }
 
 function buildRandomAgentId(): string {
@@ -412,14 +434,17 @@ export async function createAgent(input: CreateAgentInput): Promise<CreateAgentR
     }).catch(() => {})
   }
 
+  invalidateAgentsCache()
   return { ...result, agentId: result.agentId || agentId }
 }
 
 export async function updateAgentName(agentId: string, displayName: string, avatar?: string): Promise<{ ok: boolean; agentId: string }> {
-  return fetchJSON<{ ok: boolean; agentId: string }>(`/api/openclaw/agents/${encodeURIComponent(agentId)}`, {
+  const result = await fetchJSON<{ ok: boolean; agentId: string }>(`/api/openclaw/agents/${encodeURIComponent(agentId)}`, {
     method: 'PUT',
     body: JSON.stringify({ name: displayName.trim(), avatar: avatar?.trim() || undefined }),
   })
+  invalidateAgentsCache()
+  return result
 }
 
 export async function generateAgentIcon(
@@ -474,14 +499,32 @@ export async function deleteAgent(agentId: string): Promise<void> {
   await fetchJSON<unknown>(`/api/openclaw/agents/${encodeURIComponent(agentId)}?delete_files=true`, {
     method: 'DELETE',
   })
+  invalidateAgentsCache()
 }
 
 // ---------------------------------------------------------------------------
 // Session functions
 // ---------------------------------------------------------------------------
 
-export async function listSessions(): Promise<Session[]> {
-  return fetchJSON<Session[]>('/api/openclaw/sessions')
+export async function listSessions(options: { force?: boolean } = {}): Promise<Session[]> {
+  if (!options.force && sessionsCache) return sessionsCache
+  if (!options.force && sessionsRequest) return sessionsRequest
+
+  sessionsRequest = fetchJSON<Session[]>('/api/openclaw/sessions')
+    .then(result => {
+      sessionsCache = result
+      return result
+    })
+    .finally(() => {
+      sessionsRequest = null
+    })
+
+  return sessionsRequest
+}
+
+export function invalidateSessionsCache(): void {
+  sessionsCache = null
+  sessionsRequest = null
 }
 
 export async function getSession(key: string): Promise<SessionDetail> {
@@ -492,19 +535,22 @@ export async function deleteSession(key: string): Promise<void> {
   await fetchJSON<unknown>(`/api/openclaw/sessions/${encodeURIComponent(key)}`, {
     method: 'DELETE',
   })
+  invalidateSessionsCache()
 }
 
 export async function updateSessionTitle(
   key: string,
   title: string,
 ): Promise<{ ok: boolean; key: string; title: string | null }> {
-  return fetchJSON<{ ok: boolean; key: string; title: string | null }>(
+  const result = await fetchJSON<{ ok: boolean; key: string; title: string | null }>(
     `/api/openclaw/sessions/${encodeURIComponent(key)}/title`,
     {
       method: 'PUT',
       body: JSON.stringify({ title }),
     },
   )
+  invalidateSessionsCache()
+  return result
 }
 
 // ---------------------------------------------------------------------------
@@ -514,14 +560,17 @@ export async function updateSessionTitle(
 export async function sendChatMessage(
   sessionKey: string,
   message: string,
-): Promise<{ ok: boolean; runId: string | null }> {
-  return fetchJSON<{ ok: boolean; runId: string | null }>(
+  titleSource?: string,
+): Promise<{ ok: boolean; runId: string | null; title?: string | null }> {
+  const result = await fetchJSON<{ ok: boolean; runId: string | null; title?: string | null }>(
     `/api/openclaw/sessions/${encodeURIComponent(sessionKey)}/messages`,
     {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, titleSource }),
     },
   )
+  invalidateSessionsCache()
+  return result
 }
 
 export async function waitForAgentRun(
@@ -531,6 +580,23 @@ export async function waitForAgentRun(
   const params = new URLSearchParams({ timeoutMs: String(timeoutMs) })
   return fetchJSON<AgentRunWaitResult>(
     `/api/openclaw/runs/${encodeURIComponent(runId)}/wait?${params.toString()}`,
+  )
+}
+
+export async function abortAgentRun(
+  runId: string,
+  sessionKey: string,
+): Promise<{ ok?: boolean }> {
+  return fetchJSON<{ ok?: boolean }>(`/api/openclaw/runs/${encodeURIComponent(runId)}/abort`, {
+    method: 'POST',
+    body: JSON.stringify({ sessionKey }),
+  })
+}
+
+export async function abortActiveSessionRun(sessionKey: string): Promise<{ ok?: boolean }> {
+  return fetchJSON<{ ok?: boolean }>(
+    `/api/openclaw/sessions/${encodeURIComponent(sessionKey)}/abort-active`,
+    { method: 'POST' },
   )
 }
 

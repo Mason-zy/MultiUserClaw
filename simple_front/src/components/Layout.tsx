@@ -2,7 +2,6 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Check,
-  Clock3,
   Copy,
   Bot,
   ChevronRight,
@@ -34,7 +33,12 @@ import type { AgentInfo, AuthUser, Session } from '../lib/api.ts'
 
 export type LayoutOutletContext = {
   user: AuthUser | null
-  refreshSessions: () => Promise<void>
+  agents: AgentInfo[]
+  agentsLoading: boolean
+  currentSessionTitle: string | null
+  refreshAgents: (options?: { force?: boolean }) => Promise<void>
+  refreshSessions: (options?: { silent?: boolean; force?: boolean }) => Promise<void>
+  addOptimisticSession: (session: Session) => void
   openMobileSidebar: () => void
 }
 
@@ -60,6 +64,22 @@ const retiredBuiltInAgentIds = new Set(['manager', 'programmer', 'researcher', '
 
 function getSessionTitle(session: Session): string {
   return session.title?.trim() || session.key.split(':').pop() || session.key
+}
+
+function getConfirmSessionTitle(session: Session): string {
+  const title = getSessionTitle(session)
+  const chars = Array.from(title)
+  if (chars.length <= 36) return title
+  return `${chars.slice(0, 36).join('')}...`
+}
+
+function isSystemSession(session: Session): boolean {
+  const value = `${session.key} ${session.title || ''}`.toLowerCase()
+  return value.includes('heartbeat') || value.includes('心跳')
+}
+
+function isUserChatSession(session: Session): boolean {
+  return session.key.startsWith('agent:')
 }
 
 function formatRelativeTime(iso: string | null): string {
@@ -97,12 +117,28 @@ async function copyText(value: string): Promise<void> {
   }
 }
 
+function SidebarSessionSkeleton({ count = 4 }: { count?: number }) {
+  return (
+    <div className="space-y-1 px-2 py-1.5" aria-hidden="true">
+      {Array.from({ length: count }).map((_, index) => (
+        <div key={index} className="flex items-center gap-2 rounded-xl px-1 py-1.5">
+          <span className="skeleton-shimmer h-4 w-4 shrink-0 rounded-md" />
+          <span className="skeleton-shimmer h-3.5 flex-1 rounded-full" />
+          <span className="skeleton-shimmer h-3 w-8 shrink-0 rounded-full" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function Layout() {
   const navigate = useNavigate()
   const location = useLocation()
   const [user, setUser] = useState<AuthUser | null>(null)
   const [agents, setAgents] = useState<AgentInfo[]>([])
+  const [agentsLoading, setAgentsLoading] = useState(true)
   const [sessions, setSessions] = useState<Session[]>([])
+  const [optimisticSessions, setOptimisticSessions] = useState<Session[]>([])
   const [sessionsLoading, setSessionsLoading] = useState(true)
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null)
   const [agentMenu, setAgentMenu] = useState<AgentMenuState>(null)
@@ -119,24 +155,45 @@ export default function Layout() {
     return params.get('session')
   }, [location.search])
 
-  const refreshSessions = useCallback(async () => {
-    setSessionsLoading(true)
+  const refreshSessions = useCallback(async (options: { silent?: boolean; force?: boolean } = {}) => {
+    if (!options.silent) {
+      setSessionsLoading(true)
+    }
     try {
-      const result = await listSessions()
+      const result = await listSessions({ force: options.force })
       setSessions(result)
+      const actualKeys = new Set(result.map(session => session.key))
+      setOptimisticSessions(prev => prev.filter(session => !actualKeys.has(session.key)))
     } catch {
       setSessions([])
     } finally {
-      setSessionsLoading(false)
+      if (!options.silent) {
+        setSessionsLoading(false)
+      }
     }
   }, [])
 
-  const refreshAgents = useCallback(async () => {
+  const addOptimisticSession = useCallback((session: Session) => {
+    setOptimisticSessions(prev => {
+      if (sessions.some(item => item.key === session.key)) {
+        return prev
+      }
+      if (prev.some(item => item.key === session.key)) {
+        return prev.map(item => (item.key === session.key ? { ...item, ...session } : item))
+      }
+      return [session, ...prev]
+    })
+  }, [sessions])
+
+  const refreshAgents = useCallback(async (options: { force?: boolean } = {}) => {
+    setAgentsLoading(true)
     try {
-      const result = await listAgents()
+      const result = await listAgents(options)
       setAgents(result.agents || [])
     } catch {
       setAgents([])
+    } finally {
+      setAgentsLoading(false)
     }
   }, [])
 
@@ -163,8 +220,23 @@ export default function Layout() {
     setMobileSidebarOpen(false)
   }, [location.pathname, location.search])
 
+  const visibleSessions = useMemo(() => {
+    const actualKeys = new Set(sessions.map(session => session.key))
+    return [
+      ...optimisticSessions.filter(session => !actualKeys.has(session.key)),
+      ...sessions,
+    ].filter(session => isUserChatSession(session) && !isSystemSession(session))
+  }, [optimisticSessions, sessions])
+
+  const currentSessionTitle = useMemo(() => {
+    if (!activeSessionKey) return null
+    const session = visibleSessions.find(item => item.key === activeSessionKey)
+    if (!session) return null
+    return getSessionTitle(session)
+  }, [activeSessionKey, visibleSessions])
+
   const agentGroups = useMemo(() => {
-    const sorted = [...sessions].sort(
+    const sorted = [...visibleSessions].sort(
       (a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime(),
     )
     const sessionsByAgent = new Map<string, Session[]>()
@@ -173,12 +245,7 @@ export default function Layout() {
       sessionsByAgent.set(agentId, [...(sessionsByAgent.get(agentId) || []), session])
     })
 
-    const agentIds = new Set<string>(
-      agents
-        .map(agent => agent.id)
-        .filter(agentId => !retiredBuiltInAgentIds.has(agentId))
-        .filter(agentId => agentId !== 'main'),
-    )
+    const agentIds = new Set<string>()
     sessionsByAgent.forEach((_value, agentId) => {
       if (!retiredBuiltInAgentIds.has(agentId)) {
         agentIds.add(agentId)
@@ -195,14 +262,14 @@ export default function Layout() {
           sessions: sessionsByAgent.get(agentId) || [],
         }
       })
-  }, [agents, sessions])
+  }, [agents, visibleSessions])
 
   const ordinarySessions = useMemo(
     () =>
-      [...sessions]
+      [...visibleSessions]
         .filter(session => getAgentIdFromKey(session.key) === 'main')
         .sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()),
-    [sessions],
+    [visibleSessions],
   )
 
   const allAgentsCollapsed = agentGroups.length > 0 && agentGroups.every(group => collapsedAgents[group.id])
@@ -233,7 +300,7 @@ export default function Layout() {
     await updateSessionTitle(key, renameValue)
     setRenamingKey(null)
     setRenameValue('')
-    await refreshSessions()
+    await refreshSessions({ force: true })
   }
 
   const copySessionId = async (key: string) => {
@@ -246,7 +313,7 @@ export default function Layout() {
   const removeSession = async (session: Session) => {
     setContextMenu(null)
     await deleteSession(session.key)
-    await refreshSessions()
+    await refreshSessions({ force: true })
     if (activeSessionKey === session.key) {
       navigate('/chat')
     }
@@ -328,19 +395,15 @@ export default function Layout() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            {sessionsLoading ? (
-              <div className="flex items-center gap-2 px-2 py-3 text-xs text-slate-500">
-                <Clock3 size={13} className="animate-spin" />
-                加载会话中
-              </div>
-            ) : (
-              <>
-                <div className={`sidebar-collapse ${agentsFolderOpen ? 'is-open' : ''}`}>
-                  <div>
-                    {agentGroups.length === 0 ? (
+            <>
+              <div className={`sidebar-collapse ${agentsFolderOpen ? 'is-open' : ''}`}>
+                <div>
+                  {sessionsLoading ? (
+                    <SidebarSessionSkeleton count={3} />
+                  ) : agentGroups.length === 0 ? (
                       <div className="px-2 py-3 text-xs text-slate-500">暂无 Agent 对话</div>
-                    ) : (
-                      agentGroups.map(group => (
+                  ) : (
+                    agentGroups.map(group => (
                 <section key={group.id}>
                   <div className="group/agent flex items-center gap-1 rounded-xl px-2 py-1.5 text-sm text-light-text-secondary hover:bg-light-card/60">
                     <button
@@ -449,17 +512,16 @@ export default function Layout() {
                     </div>
                   </div>
                 </section>
-                      ))
-                    )}
-                  </div>
+                    ))
+                  )}
                 </div>
-                <div className={`sidebar-collapse ${agentsFolderOpen ? '' : 'is-open'}`}>
-                  <div className="px-2 py-3 text-xs text-slate-500">
-                    已收起 {agentGroups.length} 个 Agent
-                  </div>
+              </div>
+              <div className={`sidebar-collapse ${agentsFolderOpen ? '' : 'is-open'}`}>
+                <div className="px-2 py-3 text-xs text-slate-500">
+                  {sessionsLoading ? '正在加载 Agent 对话' : `已收起 ${agentGroups.length} 个 Agent`}
                 </div>
-              </>
-            )}
+              </div>
+            </>
 
             <section className="mt-5 border-t border-slate-200/70 pt-4">
               <div className="mb-2 flex items-center justify-between px-2 text-xs text-slate-500">
@@ -485,7 +547,9 @@ export default function Layout() {
 
               <div className={`sidebar-collapse ${ordinaryFolderOpen ? 'is-open' : ''}`}>
                 <div className="space-y-0.5">
-                  {ordinarySessions.length === 0 ? (
+                  {sessionsLoading ? (
+                    <SidebarSessionSkeleton count={6} />
+                  ) : ordinarySessions.length === 0 ? (
                     <div className="px-2 py-1 text-xs text-slate-400">暂无普通对话</div>
                   ) : ordinarySessions.slice(0, 8).map(session => {
                     const isActive = activeSessionKey === session.key
@@ -584,7 +648,12 @@ export default function Layout() {
         <Outlet
           context={{
             user,
+            agents,
+            agentsLoading,
+            currentSessionTitle,
+            refreshAgents,
             refreshSessions,
+            addOptimisticSession,
             openMobileSidebar: () => setMobileSidebarOpen(true),
           } satisfies LayoutOutletContext}
         />
@@ -612,7 +681,7 @@ export default function Layout() {
           </button>
           <Popconfirm
             title="删除这个会话？"
-            description={`会话“${getSessionTitle(contextMenu.session)}”将被删除，此操作不可恢复。`}
+            description={`会话“${getConfirmSessionTitle(contextMenu.session)}”将被删除，此操作不可恢复。`}
             confirmText="删除"
             danger
             onConfirm={() => void removeSession(contextMenu.session)}
