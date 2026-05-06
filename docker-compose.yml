@@ -15,9 +15,9 @@ services:
     container_name: openclaw-postgres
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: nanobot
-      POSTGRES_PASSWORD: nanobot
-      POSTGRES_DB: nanobot_platform
+      POSTGRES_USER: ${POSTGRES_USER:-nanobot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nanobot}
+      POSTGRES_DB: ${POSTGRES_DB:-nanobot_platform}
     ports:
       - "15432:5432"
     volumes:
@@ -25,7 +25,7 @@ services:
     networks:
       - openclaw-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nanobot -d nanobot_platform"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nanobot} -d ${POSTGRES_DB:-nanobot_platform}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -36,7 +36,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      PLATFORM_DATABASE_URL: postgresql+asyncpg://nanobot:nanobot@postgres:5432/nanobot_platform
+      PLATFORM_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nanobot}:${POSTGRES_PASSWORD:-nanobot}@postgres:5432/${POSTGRES_DB:-nanobot_platform}
       PLATFORM_JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
 
       # 启动时自动创建管理员账号
