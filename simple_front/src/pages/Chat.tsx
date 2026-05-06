@@ -115,6 +115,7 @@ export default function Chat() {
     refreshAgents,
     refreshSessions,
     addOptimisticSession,
+    setSessionThinking,
     openMobileSidebar,
   } = useOutletContext<LayoutOutletContext>()
 
@@ -139,6 +140,7 @@ export default function Chat() {
   const sessionMessagesCacheRef = useRef<Record<string, SessionDetail['messages']>>({})
 
   const setSendingForSession = useCallback((key: string, value: boolean) => {
+    setSessionThinking(key, value)
     setSendingBySession(prev => {
       const next = { ...prev }
       if (value) {
@@ -149,7 +151,7 @@ export default function Chat() {
       sendingBySessionRef.current = next
       return next
     })
-  }, [])
+  }, [setSessionThinking])
 
   const clearStreamingText = useCallback((key: string) => {
     targetTextBySessionRef.current[key] = ''
@@ -1026,16 +1028,18 @@ export default function Chat() {
             <IconButton
               label="终止回复"
               onClick={handleAbortCurrentRun}
-              className="h-9 w-9 rounded-full bg-slate-800 text-white hover:bg-slate-700"
+              surface="plain"
+              className="h-9 w-9 rounded-full !bg-[var(--color-accent-blue)] !text-white transition-colors duration-150 hover:!bg-[color-mix(in_srgb,var(--color-accent-blue)_82%,white)] hover:!text-white"
             >
-              <Square size={14} fill="currentColor" />
+              <Square size={14} />
             </IconButton>
           ) : (
             <IconButton
               label="发送"
               onClick={handleSend}
               disabled={!hasContent}
-              className="h-9 w-9 rounded-full bg-slate-800 text-white hover:bg-slate-700 disabled:bg-slate-300"
+              surface="plain"
+              className="h-9 w-9 rounded-full !bg-[var(--color-accent-blue)] !text-white transition-colors duration-150 hover:!bg-[color-mix(in_srgb,var(--color-accent-blue)_82%,white)] hover:!text-white disabled:!bg-slate-300"
             >
               <Send size={16} />
             </IconButton>
