@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import write_audit_log
 from app.config import settings
-from app.db.models import SharedAgentBinding, User
+from app.db.models import ChatSession, SharedAgentBinding, User
 
 
 @dataclass(slots=True)
@@ -116,6 +116,52 @@ def build_shared_agent_id(user_id: str) -> str:
 
 def build_session_key(agent_id: str) -> str:
     return f"agent:{agent_id}:session-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+
+
+def _extract_agent_id(session_key: str) -> str | None:
+    """Parse agent_id from session_key (format: agent:<agent_id>:...)."""
+    if not session_key or not session_key.startswith("agent:"):
+        return None
+    parts = session_key.split(":", 2)
+    return parts[1] if len(parts) >= 2 else None
+
+
+async def upsert_chat_session(
+    db: AsyncSession,
+    user_id: str,
+    session_key: str,
+    *,
+    increment_message_count: bool = False,
+) -> None:
+    """Create or update a chat session record in the database."""
+    from sqlalchemy import update
+
+    agent_id = _extract_agent_id(session_key)
+
+    # Try to find existing session
+    result = await db.execute(
+        select(ChatSession).where(ChatSession.session_key == session_key)
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        if increment_message_count:
+            await db.execute(
+                update(ChatSession)
+                .where(ChatSession.id == existing.id)
+                .values(message_count=ChatSession.message_count + 1)
+            )
+        else:
+            # Touch updated_at
+            existing.updated_at = None  # triggers onupdate
+    else:
+        db.add(
+            ChatSession(
+                user_id=user_id,
+                session_key=session_key,
+                agent_id=agent_id,
+            )
+        )
 
 
 async def ensure_shared_agent_binding(db: AsyncSession, user: User) -> SharedAgentContext:

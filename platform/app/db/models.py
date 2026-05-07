@@ -106,6 +106,26 @@ class UsageRecord(Base):
     )
 
 
+class ChatSession(Base):
+    """Per-conversation session tracking for usage/cost attribution."""
+
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    session_key: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=True)
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")  # active | archived
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index('idx_chat_session_user_created', 'user_id', 'created_at'),
+    )
+
+
 class AuditLog(Base):
     """Audit trail for key operations."""
 
