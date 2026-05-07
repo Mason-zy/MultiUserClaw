@@ -934,12 +934,13 @@ function createOpenAICompletionsClient(
   context: Context,
   apiKey: string,
   optionHeaders?: Record<string, string>,
+  turnHeaders?: Record<string, string>,
 ) {
   return new OpenAI({
     apiKey,
     baseURL: model.baseUrl,
     dangerouslyAllowBrowser: true,
-    defaultHeaders: buildOpenAIClientHeaders(model, context, optionHeaders),
+    defaultHeaders: buildOpenAIClientHeaders(model, context, optionHeaders, turnHeaders),
     fetch: buildGuardedModelFetch(model),
   });
 }
@@ -968,7 +969,17 @@ export function createOpenAICompletionsTransportStreamFn(): StreamFn {
       };
       try {
         const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-        const client = createOpenAICompletionsClient(model, context, apiKey, options?.headers);
+        const turnState = resolveProviderTransportTurnState(model, {
+          sessionId: options?.sessionId,
+          turnId: randomUUID(),
+          attempt: 1,
+          transport: "stream",
+        });
+        console.log(
+          "[openai-transport/completions] provider=%s model=%s sessionId=%s turnHeaders=%s",
+          model.provider, model.id, options?.sessionId, JSON.stringify(turnState?.headers ?? {}),
+        );
+        const client = createOpenAICompletionsClient(model, context, apiKey, options?.headers, turnState?.headers);
         let params = buildOpenAICompletionsParams(
           model as OpenAIModeModel,
           context,

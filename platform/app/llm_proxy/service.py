@@ -289,6 +289,7 @@ async def proxy_chat_completion(
     db: AsyncSession,
     container_token: str,
     raw_request: dict,
+    session_key: str | None = None,
 ):
     """Pass-through proxy: authenticate, check quota, forward to LLM, record usage.
 
@@ -302,7 +303,7 @@ async def proxy_chat_completion(
     stream = raw_request.get("stream", False)
     messages = raw_request.get("messages", [])
 
-    logger.info("收到 LLM 请求: model=%s, stream=%s, 消息数=%d", model, stream, len(messages))
+    logger.info("收到 LLM 请求: model=%s, stream=%s, 消息数=%d, session_key=%s", model, stream, len(messages), session_key)
 
     # 1. Authenticate
     container = None
@@ -424,8 +425,13 @@ async def proxy_chat_completion(
                 total = total_input + total_output
                 if user is not None and total > 0:
                     try:
+                        logger.info(
+                            "[记录用量-流式] user_id=%s model=%s session_key=%s tokens=%d/%d",
+                            user.id, model, session_key, total_input, total_output,
+                        )
                         db.add(UsageRecord(
                             user_id=user.id, model=model,
+                            session_key=session_key,
                             input_tokens=total_input, output_tokens=total_output,
                             total_tokens=total,
                         ))
@@ -450,8 +456,13 @@ async def proxy_chat_completion(
     # 6. Record usage (non-streaming)
     usage = getattr(response, "usage", None)
     if user is not None and usage:
+        logger.info(
+            "[记录用量-非流式] user_id=%s model=%s session_key=%s tokens=%d/%d",
+            user.id, model, session_key, usage.prompt_tokens or 0, usage.completion_tokens or 0,
+        )
         db.add(UsageRecord(
             user_id=user.id, model=model,
+            session_key=session_key,
             input_tokens=usage.prompt_tokens or 0,
             output_tokens=usage.completion_tokens or 0,
             total_tokens=usage.total_tokens or 0,

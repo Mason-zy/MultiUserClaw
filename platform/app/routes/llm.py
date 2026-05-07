@@ -48,10 +48,23 @@ async def chat_completions(
     if not model:
         raise HTTPException(status_code=400, detail="Missing 'model' field")
 
+    # OpenClaw sends x-openclaw-session-id in the transport layer for all providers.
+    # x-openclaw-session-key is the external API header (kept for direct-call compatibility).
+    session_key = request.headers.get("x-openclaw-session-id") or request.headers.get("x-openclaw-session-key")
+
+    # Debug: log all incoming headers to trace session_key flow
+    all_headers = dict(request.headers)
+    openclaw_headers = {k: v for k, v in all_headers.items() if "openclaw" in k.lower() or "session" in k.lower() or "x-client" in k.lower()}
+    logger.info(
+        "[LLM Proxy] model=%s stream=%s session_key=%s openclaw_headers=%s all_header_keys=%s",
+        model, stream, session_key, openclaw_headers, sorted(all_headers.keys()),
+    )
+
     result = await proxy_chat_completion(
         db=db,
         container_token=container_token,
         raw_request=raw_json,
+        session_key=session_key,
     )
 
     if stream:

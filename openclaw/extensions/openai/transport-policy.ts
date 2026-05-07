@@ -51,13 +51,15 @@ function resolveSessionHeaders(params: {
   baseUrl?: string;
   sessionId?: string;
 }): Record<string, string> | undefined {
-  if (!params.sessionId || !usesKnownNativeOpenAIRoute(params.provider, params.baseUrl)) {
+  if (!params.sessionId) {
     return undefined;
   }
   const sessionId = normalizeIdentityValue(params.sessionId);
   if (!sessionId) {
     return undefined;
   }
+  // Always send session correlation headers so platform proxies and
+  // non-native providers can use them for routing, audit, and billing.
   return {
     "x-client-request-id": sessionId,
     "x-openclaw-session-id": sessionId,
@@ -72,7 +74,15 @@ export function resolveOpenAITransportTurnState(
     baseUrl: ctx.model?.baseUrl,
     sessionId: ctx.sessionId,
   });
+  console.log(
+    "[transport-policy] resolveOpenAITransportTurnState provider=%s sessionId=%s hasHeaders=%s",
+    ctx.provider, ctx.sessionId, sessionHeaders ? "yes" : "no",
+  );
   if (!sessionHeaders) {
+    console.log(
+      "[transport-policy] NO session headers — sessionId=%s provider=%s",
+      ctx.sessionId, ctx.provider,
+    );
     return undefined;
   }
 
