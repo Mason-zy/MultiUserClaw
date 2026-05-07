@@ -138,7 +138,6 @@ async def upsert_chat_session(
 
     agent_id = _extract_agent_id(session_key)
 
-    # Try to find existing session
     result = await db.execute(
         select(ChatSession).where(ChatSession.session_key == session_key)
     )
@@ -152,7 +151,6 @@ async def upsert_chat_session(
                 .values(message_count=ChatSession.message_count + 1)
             )
         else:
-            # Touch updated_at
             existing.updated_at = None  # triggers onupdate
     else:
         db.add(
@@ -162,6 +160,50 @@ async def upsert_chat_session(
                 agent_id=agent_id,
             )
         )
+
+
+async def _upsert_chat_session_bg(
+    user_id: str,
+    session_key: str,
+    *,
+    increment_message_count: bool = False,
+) -> None:
+    """Fire-and-forget: same as upsert_chat_session but opens its own DB session.
+
+    Runs in background so DB writes never block chat latency.
+    """
+    import logging
+    _logger = logging.getLogger("platform.shared_runtime")
+    try:
+        from app.db.engine import async_session as _async_session
+        async with _async_session() as db:
+            await upsert_chat_session(db, user_id, session_key, increment_message_count=increment_message_count)
+            await db.commit()
+    except Exception:
+        _logger.exception("Background chat session upsert failed")
+
+
+def schedule_chat_session_upsert(
+    user_id: str,
+    session_key: str,
+    *,
+    increment_message_count: bool = False,
+) -> None:
+    """Schedule a background upsert of a chat session record.
+
+    Non-async wrapper so it can be called from sync contexts (e.g. inside
+    an async route without awaiting).  Uses asyncio.create_task internally.
+    """
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(
+            _upsert_chat_session_bg(
+                user_id, session_key, increment_message_count=increment_message_count,
+            )
+        )
+    except RuntimeError:
+        pass  # no running event loop, skip silently
 
 
 async def ensure_shared_agent_binding(db: AsyncSession, user: User) -> SharedAgentContext:

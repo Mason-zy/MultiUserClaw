@@ -19,7 +19,7 @@ from app.config import settings
 from app.container.manager import ensure_running, get_container
 from app.db.engine import async_session, get_db
 from app.db.models import User
-from app.shared_runtime import upsert_chat_session
+from app.shared_runtime import schedule_chat_session_upsert
 
 logger = logging.getLogger("platform.routes.proxy")
 router = APIRouter(prefix="/api/openclaw", tags=["proxy"])
@@ -476,12 +476,10 @@ async def proxy_http(
     # For non-shared mode, use regular container routing
     base_url = await _container_url(db, user)
 
-    # Record chat session in database when user sends a message
+    # Record chat session in database (fire-and-forget, never blocks chat)
     match = _SESSION_MESSAGE_RE.match(path)
     if request.method == "POST" and match:
-        session_key = match.group(1)
-        await upsert_chat_session(db, user.id, session_key, increment_message_count=True)
-        await db.commit()
+        schedule_chat_session_upsert(user.id, match.group(1), increment_message_count=True)
 
     # Close the session explicitly so the connection returns to the pool
     # before the potentially long upstream call (up to 120s).

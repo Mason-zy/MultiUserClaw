@@ -17,8 +17,8 @@ from app.shared_runtime import (
     build_session_key,
     ensure_session_owned,
     ensure_shared_agent_binding,
+    schedule_chat_session_upsert,
     shared_runtime_request,
-    upsert_chat_session,
     upload_file_to_shared_workspace,
 )
 
@@ -163,8 +163,7 @@ async def send_shared_chat(
 ):
     ctx = await ensure_shared_agent_binding(db, user)
     session_key = ensure_session_owned(ctx, req.session_key) if req.session_key else build_session_key(ctx.binding.openclaw_agent_id)
-    await upsert_chat_session(db, user.id, session_key, increment_message_count=bool(req.session_key))
-    await db.commit()
+    schedule_chat_session_upsert(user.id, session_key, increment_message_count=bool(req.session_key))
     payload = await shared_runtime_request(
         "POST",
         f"/api/sessions/{session_key}/messages",
