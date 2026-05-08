@@ -71,6 +71,7 @@ export function writeOpenclawConfig(cfg: BridgeConfig): void {
           baseUrl: cfg.proxyUrl,
           api: "openai-completions",
           apiKey: cfg.proxyToken,
+          request: { allowPrivateNetwork: true },
           models: [{
             id: cfg.model,
             name: cfg.model,
@@ -126,6 +127,7 @@ export function writeOpenclawConfig(cfg: BridgeConfig): void {
       }
       existing.models.providers["platform-proxy"] = {
         ...openclawConfig.models.providers["platform-proxy"],
+        request: { allowPrivateNetwork: true },
         models: Array.from(agentModelIds).map((id) => ({
           id,
           name: id,
