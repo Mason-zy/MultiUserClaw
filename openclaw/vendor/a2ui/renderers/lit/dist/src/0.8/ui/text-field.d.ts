@@ -6,7 +6,7 @@ export declare class TextField extends Root {
     accessor text: StringValue | null;
     accessor label: StringValue | null;
     accessor inputType: ResolvedTextField["type"] | null;
-    static styles: import("lit").CSSResult[];
-    render(): import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=text-field.d.ts.map

@@ -3,7 +3,7 @@ import { ResolvedColumn } from "../types/types";
 export declare class Column extends Root {
     accessor alignment: ResolvedColumn["alignment"];
     accessor distribution: ResolvedColumn["distribution"];
-    static styles: import("lit").CSSResult[];
-    render(): import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=column.d.ts.map

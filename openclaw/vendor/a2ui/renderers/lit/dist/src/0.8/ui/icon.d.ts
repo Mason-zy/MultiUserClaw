@@ -3,7 +3,7 @@ import { StringValue } from "../types/primitives.js";
 export declare class Icon extends Root {
     #private;
     accessor name: StringValue | null;
-    static styles: import("lit").CSSResult[];
-    render(): import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=icon.d.ts.map

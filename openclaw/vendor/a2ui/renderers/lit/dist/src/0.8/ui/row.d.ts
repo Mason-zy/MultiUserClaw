@@ -3,7 +3,7 @@ import { ResolvedRow } from "../types/types";
 export declare class Row extends Root {
     accessor alignment: ResolvedRow["alignment"];
     accessor distribution: ResolvedRow["distribution"];
-    static styles: import("lit").CSSResult[];
-    render(): import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=row.d.ts.map

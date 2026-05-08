@@ -9,8 +9,8 @@ export declare class MultipleChoice extends Root {
         value: string;
     }[];
     accessor selections: StringValue | string[];
-    static styles: import("lit").CSSResult[];
+    static styles: any[];
     protected willUpdate(changedProperties: PropertyValues<this>): void;
-    render(): import("lit-html").TemplateResult<1>;
+    render(): any;
 }
 //# sourceMappingURL=multiple-choice.d.ts.map

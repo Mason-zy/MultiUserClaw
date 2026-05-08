@@ -41,12 +41,9 @@ export function describeEmbeddedAgentStreamStrategy(params: {
   if (params.model.provider === "anthropic-vertex") {
     return "anthropic-vertex";
   }
-  if (params.currentStreamFn === undefined || params.currentStreamFn === streamSimple) {
-    return createBoundaryAwareStreamFnForModel(params.model)
-      ? `boundary-aware:${params.model.api}`
-      : "stream-simple";
-  }
-  return "session-custom";
+  return createBoundaryAwareStreamFnForModel(params.model)
+    ? `boundary-aware:${params.model.api}`
+    : `fallback:${params.model.api}`;
 }
 
 export async function resolveEmbeddedAgentApiKey(params: {
@@ -72,8 +69,11 @@ export function resolveEmbeddedAgentStreamFn(params: {
   resolvedApiKey?: string;
   authStorage?: { getApiKey(provider: string): Promise<string | undefined> };
 }): StreamFn {
+  // Resolve the inner stream function first.
+  let inner: StreamFn;
+
   if (params.providerStreamFn) {
-    const inner = params.providerStreamFn;
+    const providerInner = params.providerStreamFn;
     const normalizeContext = (context: Parameters<StreamFn>[1]) =>
       context.systemPrompt
         ? {
@@ -86,43 +86,62 @@ export function resolveEmbeddedAgentStreamFn(params: {
     // transports that still read credentials from options.apiKey.
     if (params.authStorage || params.resolvedApiKey) {
       const { authStorage, model, resolvedApiKey } = params;
-      return async (m, context, options) => {
+      inner = async (m, context, options) => {
         const apiKey = await resolveEmbeddedAgentApiKey({
           provider: model.provider,
           resolvedApiKey,
           authStorage,
         });
-        return inner(m, normalizeContext(context), {
+        return providerInner(m, normalizeContext(context), {
           ...options,
           apiKey: apiKey ?? options?.apiKey,
         });
       };
+    } else {
+      inner = (m, context, options) => providerInner(m, normalizeContext(context), options);
     }
-    return (m, context, options) => inner(m, normalizeContext(context), options);
-  }
-
-  const currentStreamFn = params.currentStreamFn ?? streamSimple;
-  if (params.shouldUseWebSocketTransport) {
-    return params.wsApiKey
-      ? createOpenAIWebSocketStreamFn(params.wsApiKey, params.sessionId, {
-          signal: params.signal,
-          managerOptions: {
-            request: getModelProviderRequestTransport(params.model),
-          },
-        })
-      : currentStreamFn;
-  }
-
-  if (params.model.provider === "anthropic-vertex") {
-    return createAnthropicVertexStreamFnForModel(params.model);
-  }
-
-  if (params.currentStreamFn === undefined || params.currentStreamFn === streamSimple) {
-    const boundaryAwareStreamFn = createBoundaryAwareStreamFnForModel(params.model);
-    if (boundaryAwareStreamFn) {
-      return boundaryAwareStreamFn;
+  } else {
+    const currentStreamFn = params.currentStreamFn ?? streamSimple;
+    if (params.shouldUseWebSocketTransport) {
+      inner = params.wsApiKey
+        ? createOpenAIWebSocketStreamFn(params.wsApiKey, params.sessionId, {
+            signal: params.signal,
+            managerOptions: {
+              request: getModelProviderRequestTransport(params.model),
+            },
+          })
+        : currentStreamFn;
+    } else if (params.model.provider === "anthropic-vertex") {
+      inner = createAnthropicVertexStreamFnForModel(params.model);
+    } else {
+      // Always try the boundary-aware transport for supported APIs,
+      // regardless of what currentStreamFn is. pi-agent-core may set a
+      // non-streamSimple default that lacks session correlation headers.
+      const boundaryAwareStreamFn = createBoundaryAwareStreamFnForModel(params.model);
+      if (boundaryAwareStreamFn) {
+        inner = boundaryAwareStreamFn;
+      } else {
+        const fnName = params.currentStreamFn?.name || "<anonymous>";
+        const fnStr = String(params.currentStreamFn).slice(0, 200);
+        console.log(
+          "[stream-resolution] unsupported api — falling back to currentStreamFn name=%s preview=%s",
+          fnName, fnStr,
+        );
+        inner = currentStreamFn;
+      }
     }
   }
 
-  return currentStreamFn;
+  // Inject sessionId into options so transport layers can set session
+  // correlation headers (x-openclaw-session-id, x-client-request-id).
+  // pi-agent-core does not pass sessionId in stream options, so we bridge
+  // the gap here.
+  const sessionId = params.sessionId;
+  return (m, context, options) => {
+    console.log(
+      "[stream-resolution] invoking inner streamFn sessionId=%s provider=%s api=%s",
+      sessionId, m.provider, m.api,
+    );
+    return inner(m, context, { ...options, sessionId });
+  };
 }

@@ -20,7 +20,7 @@ import type {
   ResponseInputMessageContentList,
 } from "openai/resources/responses/responses.js";
 import { resolveProviderTransportTurnStateWithPlugin } from "../plugins/provider-runtime.js";
-import type { ProviderRuntimeModel } from "../plugins/types.js";
+import type { ProviderRuntimeModel, ProviderTransportTurnState } from "../plugins/types.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./copilot-dynamic-headers.js";
 import { detectOpenAICompletionsCompat } from "./openai-completions-compat.js";
 import { flattenCompletionMessagesToStringContent } from "./openai-completions-string-content.js";
@@ -601,6 +601,40 @@ function buildOpenAIClientHeaders(
   return headers;
 }
 
+function buildFallbackSessionHeaders(sessionId?: string): Record<string, string> | undefined {
+  if (!sessionId) return undefined;
+  const normalized = sessionId.trim().replace(/[\r\n]+/g, " ").slice(0, 160);
+  if (!normalized) return undefined;
+  return {
+    "x-client-request-id": normalized,
+    "x-openclaw-session-id": normalized,
+  };
+}
+
+function buildFallbackTransportTurnState(params: {
+  sessionId?: string;
+  turnId: string;
+  attempt: number;
+  transport: "stream" | "websocket";
+}): ProviderTransportTurnState | undefined {
+  const headers = buildFallbackSessionHeaders(params.sessionId);
+  if (!headers) return undefined;
+  const attempt = String(Math.max(1, params.attempt));
+  return {
+    headers: {
+      ...headers,
+      "x-openclaw-turn-id": params.turnId,
+      "x-openclaw-turn-attempt": attempt,
+    },
+    metadata: {
+      openclaw_session_id: headers["x-openclaw-session-id"] ?? "",
+      openclaw_turn_id: params.turnId,
+      openclaw_turn_attempt: attempt,
+      openclaw_transport: params.transport,
+    },
+  };
+}
+
 function resolveProviderTransportTurnState(
   model: Model<Api>,
   params: {
@@ -609,19 +643,22 @@ function resolveProviderTransportTurnState(
     attempt: number;
     transport: "stream" | "websocket";
   },
-) {
-  return resolveProviderTransportTurnStateWithPlugin({
-    provider: model.provider,
-    context: {
+): ProviderTransportTurnState | undefined {
+  return (
+    resolveProviderTransportTurnStateWithPlugin({
       provider: model.provider,
-      modelId: model.id,
-      model: model as ProviderRuntimeModel,
-      sessionId: params.sessionId,
-      turnId: params.turnId,
-      attempt: params.attempt,
-      transport: params.transport,
-    },
-  });
+      context: {
+        provider: model.provider,
+        modelId: model.id,
+        model: model as ProviderRuntimeModel,
+        sessionId: params.sessionId,
+        turnId: params.turnId,
+        attempt: params.attempt,
+        transport: params.transport,
+      },
+    }) ??
+    buildFallbackTransportTurnState(params)
+  );
 }
 
 function createOpenAIResponsesClient(
@@ -670,6 +707,10 @@ export function createOpenAIResponsesTransportStreamFn(): StreamFn {
           attempt: 1,
           transport: "stream",
         });
+        console.log(
+          "[openai-transport/responses] provider=%s model=%s sessionId=%s",
+          model.provider, model.id, options?.sessionId,
+        );
         const client = createOpenAIResponsesClient(
           model,
           context,
@@ -703,11 +744,19 @@ export function createOpenAIResponsesTransportStreamFn(): StreamFn {
         if (output.stopReason === "aborted" || output.stopReason === "error") {
           throw new Error("An unknown error occurred");
         }
+        console.log(
+          "[openai-transport/responses] done provider=%s model=%s stopReason=%s usage=%j",
+          model.provider, model.id, output.stopReason, output.usage,
+        );
         stream.push({ type: "done", reason: output.stopReason as never, message: output as never });
         stream.end();
       } catch (error) {
         output.stopReason = options?.signal?.aborted ? "aborted" : "error";
         output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+        console.error(
+          "[openai-transport/responses] error provider=%s model=%s message=%s",
+          model.provider, model.id, output.errorMessage,
+        );
         stream.push({ type: "error", reason: output.stopReason as never, error: output as never });
         stream.end();
       }
@@ -829,6 +878,10 @@ export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
           attempt: 1,
           transport: "stream",
         });
+        console.log(
+          "[openai-transport/azure-responses] provider=%s model=%s sessionId=%s",
+          model.provider, model.id, options?.sessionId,
+        );
         const client = createAzureOpenAIClient(
           model,
           context,
@@ -861,11 +914,19 @@ export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
         if (output.stopReason === "aborted" || output.stopReason === "error") {
           throw new Error("An unknown error occurred");
         }
+        console.log(
+          "[openai-transport/azure-responses] done provider=%s model=%s stopReason=%s usage=%j",
+          model.provider, model.id, output.stopReason, output.usage,
+        );
         stream.push({ type: "done", reason: output.stopReason as never, message: output as never });
         stream.end();
       } catch (error) {
         output.stopReason = options?.signal?.aborted ? "aborted" : "error";
         output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+        console.error(
+          "[openai-transport/azure-responses] error provider=%s model=%s message=%s",
+          model.provider, model.id, output.errorMessage,
+        );
         stream.push({ type: "error", reason: output.stopReason as never, error: output as never });
         stream.end();
       }
@@ -947,6 +1008,10 @@ function createOpenAICompletionsClient(
 
 export function createOpenAICompletionsTransportStreamFn(): StreamFn {
   return (model, context, options) => {
+    console.log(
+      "[openai-transport/completions] ENTRY provider=%s model=%s api=%s sessionId=%s",
+      model.provider, model.id, model.api, options?.sessionId,
+    );
     const eventStream = createAssistantMessageEventStream();
     const stream = eventStream as unknown as { push(event: unknown): void; end(): void };
     void (async () => {
@@ -997,11 +1062,19 @@ export function createOpenAICompletionsTransportStreamFn(): StreamFn {
         if (options?.signal?.aborted) {
           throw new Error("Request was aborted");
         }
+        console.log(
+          "[openai-transport/completions] done provider=%s model=%s stopReason=%s usage=%j",
+          model.provider, model.id, output.stopReason, output.usage,
+        );
         stream.push({ type: "done", reason: output.stopReason as never, message: output as never });
         stream.end();
       } catch (error) {
         output.stopReason = options?.signal?.aborted ? "aborted" : "error";
         output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+        console.error(
+          "[openai-transport/completions] error provider=%s model=%s message=%s",
+          model.provider, model.id, output.errorMessage,
+        );
         stream.push({ type: "error", reason: output.stopReason as never, error: output as never });
         stream.end();
       }

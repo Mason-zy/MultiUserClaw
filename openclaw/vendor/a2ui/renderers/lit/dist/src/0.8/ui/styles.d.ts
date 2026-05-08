@@ -1,2 +1,2 @@
-export declare const structuralStyles: import("lit").CSSResult;
+export declare const structuralStyles: any;
 //# sourceMappingURL=styles.d.ts.map

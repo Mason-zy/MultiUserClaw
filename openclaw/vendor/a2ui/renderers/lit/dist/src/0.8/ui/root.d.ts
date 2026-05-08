@@ -13,7 +13,7 @@ export declare class Root extends Root_base {
     accessor enableCustomElements: boolean;
     set weight(weight: string | number);
     get weight(): string | number;
-    static styles: import("lit").CSSResult[];
+    static styles: any[];
     protected willUpdate(changedProperties: PropertyValues<this>): void;
     /**
      * Clean up the effect when the component is removed from the DOM.

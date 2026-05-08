@@ -5,7 +5,7 @@ export declare class Text extends Root {
     #private;
     accessor text: StringValue | null;
     accessor usageHint: ResolvedText["usageHint"] | null;
-    static styles: import("lit").CSSResult[];
-    render(): import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=text.d.ts.map

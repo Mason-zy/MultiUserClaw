@@ -131,6 +131,7 @@ ENV PATH="/app/node_modules/.bin:$PATH"
 # Let all plugins resolve root dependencies (for example @sinclair/typebox)
 ENV NODE_PATH="/app/node_modules"
 
+RUN pnpm config set package-manager-strict false
 RUN --mount=type=cache,id=openclaw-bridge-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
     --mount=type=cache,id=openclaw-bridge-pnpm-metadata,target=/root/.cache/pnpm,sharing=locked \
     pnpm install --offline --frozen-lockfile --reporter=append-only

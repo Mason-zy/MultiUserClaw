@@ -3,7 +3,7 @@ import { StringValue } from "../types/primitives.js";
 export declare class Audio extends Root {
     #private;
     accessor url: StringValue | null;
-    static styles: import("lit").CSSResult[];
-    render(): import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=audio.d.ts.map

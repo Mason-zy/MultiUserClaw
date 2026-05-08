@@ -72,8 +72,16 @@ export function createTransportAwareStreamFnForModel(model: Model<Api>): StreamF
 
 export function createBoundaryAwareStreamFnForModel(model: Model<Api>): StreamFn | undefined {
   if (!isTransportAwareApiSupported(model.api)) {
+    console.log(
+      "[boundary-aware] SKIP — unsupported api=%s provider=%s",
+      model.api, model.provider,
+    );
     return undefined;
   }
+  console.log(
+    "[boundary-aware] creating stream fn for api=%s provider=%s",
+    model.api, model.provider,
+  );
   return createSupportedTransportStreamFn(model.api);
 }
 

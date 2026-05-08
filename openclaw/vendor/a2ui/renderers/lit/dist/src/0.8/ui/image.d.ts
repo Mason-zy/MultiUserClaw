@@ -6,7 +6,7 @@ export declare class Image extends Root {
     accessor url: StringValue | null;
     accessor usageHint: ResolvedImage["usageHint"] | null;
     accessor fit: "contain" | "cover" | "fill" | "none" | "scale-down" | null;
-    static styles: import("lit").CSSResult[];
-    render(): import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=image.d.ts.map

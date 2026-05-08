@@ -1,4 +1,3 @@
-import { nothing } from "lit";
 import { Root } from "./root.js";
 import { NumberValue, StringValue } from "../types/primitives";
 import { ResolvedTextField } from "../types/types.js";
@@ -9,7 +8,7 @@ export declare class Slider extends Root {
     accessor maxValue: number;
     accessor label: StringValue | null;
     accessor inputType: ResolvedTextField["type"] | null;
-    static styles: import("lit").CSSResult[];
-    render(): typeof nothing | import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=slider.d.ts.map

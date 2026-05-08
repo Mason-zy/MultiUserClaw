@@ -1,5 +1,2 @@
-import { type Theme } from "../../types/types.js";
-export declare const themeContext: {
-    __context__: Theme | undefined;
-};
+export declare const themeContext: any;
 //# sourceMappingURL=theme.d.ts.map

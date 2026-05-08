@@ -1,4 +1,3 @@
-import { nothing } from "lit";
 import { Root } from "./root.js";
 import { StringValue } from "../types/primitives.js";
 export declare class DateTimeInput extends Root {
@@ -7,7 +6,7 @@ export declare class DateTimeInput extends Root {
     accessor label: StringValue | null;
     accessor enableDate: boolean;
     accessor enableTime: boolean;
-    static styles: import("lit").CSSResult[];
-    render(): typeof nothing | import("lit-html").TemplateResult<1>;
+    static styles: any[];
+    render(): any;
 }
 //# sourceMappingURL=datetime-input.d.ts.map

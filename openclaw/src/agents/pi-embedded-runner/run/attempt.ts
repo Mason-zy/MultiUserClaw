@@ -1030,6 +1030,9 @@ export async function runEmbeddedAttempt(
         resolvedApiKey: params.resolvedApiKey,
         authStorage: params.authStorage,
       });
+      log.info(
+        `[stream-fn] strategy=${streamStrategy} provider=${params.provider} api=${params.model.api} hasProviderStreamFn=${String(Boolean(providerStreamFn))} sessionId=${params.sessionId}`,
+      );
 
       const { effectiveExtraParams } = applyExtraParamsToAgent(
         activeSession.agent,
