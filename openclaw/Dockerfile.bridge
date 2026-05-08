@@ -114,6 +114,7 @@ RUN pnpm config set registry https://registry.npmmirror.com && \
 # Pre-fetch external packages into the shared pnpm store so source-only changes
 # can reuse downloaded dependencies.
 RUN --mount=type=cache,id=openclaw-bridge-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    --mount=type=cache,id=openclaw-bridge-pnpm-metadata,target=/root/.cache/pnpm,sharing=locked \
     pnpm fetch --frozen-lockfile --reporter=append-only
 
 FROM bridge-base AS bridge-build
@@ -131,6 +132,7 @@ ENV PATH="/app/node_modules/.bin:$PATH"
 ENV NODE_PATH="/app/node_modules"
 
 RUN --mount=type=cache,id=openclaw-bridge-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    --mount=type=cache,id=openclaw-bridge-pnpm-metadata,target=/root/.cache/pnpm,sharing=locked \
     pnpm install --offline --frozen-lockfile --reporter=append-only
 
 # Clean previous build outputs, but do not delete source-tree .js files.
