@@ -1034,6 +1034,12 @@ export function createOpenAICompletionsTransportStreamFn(): StreamFn {
       };
       try {
         const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+        console.log(
+          "[openai-transport/completions] apiKey source: options.apiKey=%s envApiKey=%s finalEmpty=%s",
+          options?.apiKey ? "<set>" : "<undefined>",
+          getEnvApiKey(model.provider) ? "<set>" : "<undefined>",
+          String(!apiKey),
+        );
         const turnState = resolveProviderTransportTurnState(model, {
           sessionId: options?.sessionId,
           turnId: randomUUID(),

@@ -132,14 +132,36 @@ export function resolveEmbeddedAgentStreamFn(params: {
     }
   }
 
-  // Inject sessionId into options so transport layers can set session
-  // correlation headers (x-openclaw-session-id, x-client-request-id).
-  // pi-agent-core does not pass sessionId in stream options, so we bridge
-  // the gap here.
+  // Inject sessionId and apiKey into options. pi-agent-core does not pass
+  // sessionId in stream options, and may not pass the apiKey for non-native
+  // providers (e.g. platform-proxy). We bridge both gaps here.
   const sessionId = params.sessionId;
+  const resolvedApiKey = params.resolvedApiKey;
+  const authStorage = params.authStorage;
+  const model = params.model;
+
+  if (resolvedApiKey || authStorage) {
+    return async (m, context, options) => {
+      const apiKey = await resolveEmbeddedAgentApiKey({
+        provider: model.provider,
+        resolvedApiKey,
+        authStorage,
+      });
+      console.log(
+        "[stream-resolution] invoking inner streamFn sessionId=%s apiKey=%s provider=%s api=%s",
+        sessionId, apiKey ? "<set>" : "<none>", m.provider, m.api,
+      );
+      return inner(m, context, {
+        ...options,
+        sessionId,
+        apiKey: apiKey ?? options?.apiKey,
+      });
+    };
+  }
+
   return (m, context, options) => {
     console.log(
-      "[stream-resolution] invoking inner streamFn sessionId=%s provider=%s api=%s",
+      "[stream-resolution] invoking inner streamFn sessionId=%s (no apiKey resolver) provider=%s api=%s",
       sessionId, m.provider, m.api,
     );
     return inner(m, context, { ...options, sessionId });
