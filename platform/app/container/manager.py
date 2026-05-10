@@ -281,7 +281,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     except DockerNotFound:
         pass
 
-    # Fetch user's SSO token if available (e.g. InfoX-Med)
+    # 当使用单点登录时，用户的单点SSO的Token自动注入到容器环境变量，但是这个会导致容器重新创建才能生效，不是特别好
     # user_result = await db.execute(select(User).where(User.id == user_id))
     # user_row = user_result.scalar_one_or_none()
     # sso_token = user_row.sso_token if user_row else None

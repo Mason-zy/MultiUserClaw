@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
 
-    # Public-facing base URL (used to generate external access URLs in port mapping)
+    # 使用容器端口时，对外进行API展示时使用，绑定的对外的域名，形成skills时对外显示
     public_base_url: str = "http://www.exmaple.com"
 
     # Local dev: set to e.g. "http://127.0.0.1:18080" to skip Docker containers

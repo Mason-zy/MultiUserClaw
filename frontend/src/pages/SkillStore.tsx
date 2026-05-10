@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { listSkills, searchSkills, installSkill, toggleSkill, deleteSkill, scanGitSkills, installGitSkills, uploadSkillZip, downloadSkillUrl, getAccessToken, getRecommendedSkills, installRecommendedSkill } from '../lib/api'
 import type { Skill, SkillSearchResult, GitScanResult, RecommendedCategory } from '../lib/api'
 import { Zap, Loader2, Search, Download, ExternalLink, Check, GitBranch, Upload, Trash2, ChevronLeft, ChevronRight, Tag } from 'lucide-react'
+import SkillDetailModal from '../components/SkillDetailModal'
 
 export default function SkillStore() {
   const [skills, setSkills] = useState<Skill[]>([])
@@ -35,6 +36,9 @@ export default function SkillStore() {
   const [recInstalling, setRecInstalling] = useState<string | null>(null)
   const [recInstalled, setRecInstalled] = useState<Set<string>>(new Set())
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Skill detail modal state
+  const [detailSkill, setDetailSkill] = useState<{ name: string; category: string } | null>(null)
 
   // Git repo state
   const [gitUrl, setGitUrl] = useState('')
@@ -347,16 +351,17 @@ export default function SkillStore() {
                 return (
                   <div
                     key={skill.name}
-                    className={`rounded-xl border p-4 transition-colors ${
+                    className={`rounded-xl border p-4 transition-colors cursor-pointer ${
                       isDone
                         ? 'border-accent-green/30 bg-accent-green/5'
                         : 'border-dark-border bg-dark-card hover:border-accent-blue/30'
                     }`}
+                    onClick={() => setDetailSkill({ name: skill.name, category: skill.category })}
                   >
                     <div className="flex items-start justify-between">
                       <h3 className="text-sm font-semibold text-dark-text truncate flex-1">{skill.name}</h3>
                       <button
-                        onClick={() => handleRecInstall(skill.category, skill.name)}
+                        onClick={(e) => { e.stopPropagation(); handleRecInstall(skill.category, skill.name) }}
                         disabled={isDone || isInstalling}
                         className={`ml-2 flex shrink-0 items-center gap-1 rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
                           isDone
@@ -659,6 +664,18 @@ export default function SkillStore() {
           </div>
         )}
       </div>
+
+      {/* Skill detail modal */}
+      {detailSkill && (
+        <SkillDetailModal
+          skillName={detailSkill.name}
+          category={detailSkill.category}
+          isInstalled={skills.some(s => s.name === detailSkill.name) || recInstalled.has(detailSkill.name)}
+          isInstalling={recInstalling === detailSkill.name}
+          onInstall={() => handleRecInstall(detailSkill.category, detailSkill.name)}
+          onClose={() => setDetailSkill(null)}
+        />
+      )}
     </div>
   )
 }

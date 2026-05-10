@@ -143,6 +143,9 @@ RUN --mount=type=cache,id=openclaw-bridge-pnpm-store,target=/root/.local/share/p
 RUN rm -rf /app/dist && \
     find /app/extensions -mindepth 2 -maxdepth 2 -type d \( -name dist -o -name build \) -prune -exec rm -rf {} +
 RUN pnpm build
+# Pre-build Control UI assets to avoid ~30s runtime compilation on first start
+ENV OPENCLAW_PREFER_PNPM=1
+RUN pnpm ui:build
 
 # Install openclaw command to /usr/local/bin/openclaw
 RUN --mount=type=cache,id=openclaw-bridge-npm-cache,target=/root/.npm,sharing=locked \
@@ -213,4 +216,5 @@ COPY bridge-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["node", "--import", "tsx", "bridge/start.ts"]
+# 使用已经编译的start.js启动，这样速度更快
+CMD ["node", "bridge/dist/bridge/start.js"]
