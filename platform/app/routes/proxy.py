@@ -6,11 +6,25 @@ forwarded to their individual Docker container.
 
 from __future__ import annotations
 
+import json
 import logging
+import math
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlencode
 
 import docker
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
@@ -22,6 +36,282 @@ from app.runtime_backends.hermes_files import read_file_from_hermes_container
 
 logger = logging.getLogger("platform.routes.proxy")
 router = APIRouter(prefix="/api/openclaw", tags=["proxy"])
+
+
+def _dedicated_runtime_backend() -> str:
+    return (settings.dedicated_runtime_backend or "openclaw").strip().lower()
+
+
+def _query_string(request: Request) -> str:
+    if isinstance(request.query_params, dict):
+        query = urlencode(request.query_params)
+        return f"?{query}" if query else ""
+    query = str(request.query_params)
+    return f"?{query}" if query else ""
+
+
+def _hermes_auth_headers() -> dict[str, str]:
+    if not settings.dedicated_hermes_api_key:
+        return {}
+    return {"Authorization": f"Bearer {settings.dedicated_hermes_api_key}"}
+
+
+def _iso_to_ms(value: Any) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def _hermes_model_to_openclaw_model(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    model_id = str(item.get("id") or item.get("name") or "").strip()
+    if not model_id:
+        return None
+    provider = model_id.split("/", 1)[0] if "/" in model_id else "hermes"
+    return {
+        "id": model_id,
+        "name": model_id,
+        "provider": provider,
+    }
+
+
+def _hermes_job_to_openclaw_cron_job(job: dict[str, Any]) -> dict[str, Any]:
+    schedule = job.get("schedule")
+    if not isinstance(schedule, dict):
+        schedule = {}
+    schedule_kind = str(schedule.get("kind") or "")
+    schedule_expr = None
+    schedule_every_ms = None
+    if schedule_kind == "cron":
+        schedule_expr = schedule.get("expr")
+    elif schedule_kind == "interval":
+        minutes = schedule.get("minutes")
+        if isinstance(minutes, int):
+            schedule_every_ms = minutes * 60_000
+    elif schedule_kind == "once":
+        schedule_expr = schedule.get("run_at")
+
+    return {
+        "id": str(job.get("id") or ""),
+        "name": job.get("name") or str(job.get("id") or ""),
+        "enabled": bool(job.get("enabled", True)),
+        "schedule_kind": schedule_kind or "unknown",
+        "schedule_display": job.get("schedule_display") or schedule.get("display") or "",
+        "schedule_expr": schedule_expr,
+        "schedule_every_ms": schedule_every_ms,
+        "message": job.get("prompt") or "",
+        "deliver": bool(job.get("deliver") and job.get("deliver") != "local"),
+        "channel": None if job.get("deliver") in (None, "local") else str(job.get("deliver")),
+        "to": None,
+        "next_run_at_ms": _iso_to_ms(job.get("next_run_at")),
+        "last_run_at_ms": _iso_to_ms(job.get("last_run_at")),
+        "last_status": job.get("last_status"),
+        "last_error": job.get("last_error"),
+        "created_at_ms": _iso_to_ms(job.get("created_at")) or 0,
+    }
+
+
+def _openclaw_cron_schedule_to_hermes(body: dict[str, Any]) -> str:
+    cron_expr = str(body.get("cron_expr") or "").strip()
+    if cron_expr:
+        return cron_expr
+    at_iso = str(body.get("at_iso") or "").strip()
+    if at_iso:
+        return at_iso
+    every_seconds = body.get("every_seconds")
+    if isinstance(every_seconds, (int, float)) and every_seconds > 0:
+        minutes = max(1, math.ceil(float(every_seconds) / 60))
+        return f"every {minutes}m"
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Hermes cron compatibility requires cron_expr, at_iso, or every_seconds",
+    )
+
+
+def _safe_json_payload(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return {}
+
+
+async def _hermes_request(method: str, base_url: str, path: str, **kwargs) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        try:
+            return await client.request(
+                method=method,
+                url=f"{base_url}{path}",
+                headers={**_hermes_auth_headers(), **kwargs.pop("headers", {})},
+                **kwargs,
+            )
+        except httpx.ConnectError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hermes runtime is starting up, please retry in a few seconds",
+            ) from exc
+
+
+async def _proxy_hermes_models(base_url: str) -> JSONResponse:
+    response = await _hermes_request("GET", base_url, "/v1/models")
+    if response.status_code >= 400:
+        return JSONResponse(
+            status_code=response.status_code,
+            content={"models": [], "configuredModel": settings.default_model, "configuredProviders": {}},
+        )
+    payload = _safe_json_payload(response)
+    raw_models = payload.get("data") if isinstance(payload, dict) else []
+    models = [
+        mapped
+        for mapped in (_hermes_model_to_openclaw_model(item) for item in raw_models or [])
+        if mapped is not None
+    ]
+    return JSONResponse(
+        {
+            "models": models,
+            "configuredModel": settings.default_model,
+            "configuredProviders": {"hermes": {"configured": True}},
+            "runtime": "hermes",
+        }
+    )
+
+
+async def _proxy_hermes_status(base_url: str) -> JSONResponse:
+    response = await _hermes_request("GET", base_url, "/health")
+    payload = _safe_json_payload(response)
+    return JSONResponse(
+        status_code=response.status_code,
+        content={"ok": response.status_code < 400, "runtime": "hermes", "upstream": payload},
+    )
+
+
+async def _proxy_hermes_cron(path: str, request: Request, base_url: str) -> JSONResponse:
+    parts = path.strip("/").split("/")
+    if parts == ["cron", "jobs"] and request.method == "GET":
+        response = await _hermes_request("GET", base_url, f"/api/jobs{_query_string(request)}")
+        payload = _safe_json_payload(response)
+        jobs = payload.get("jobs") if isinstance(payload, dict) else []
+        return JSONResponse(
+            status_code=response.status_code,
+            content=[
+                _hermes_job_to_openclaw_cron_job(job)
+                for job in jobs
+                if isinstance(job, dict)
+            ],
+        )
+
+    if parts == ["cron", "jobs"] and request.method == "POST":
+        body = json.loads((await request.body()) or b"{}")
+        hermes_body = {
+            "name": body.get("name") or "cron job",
+            "prompt": body.get("message") or "",
+            "schedule": _openclaw_cron_schedule_to_hermes(body),
+            "deliver": body.get("channel") if body.get("deliver") and body.get("channel") else "local",
+        }
+        response = await _hermes_request("POST", base_url, "/api/jobs", json=hermes_body)
+        payload = _safe_json_payload(response)
+        job = payload.get("job") if isinstance(payload, dict) else None
+        return JSONResponse(
+            status_code=response.status_code,
+            content=_hermes_job_to_openclaw_cron_job(job) if isinstance(job, dict) else payload,
+        )
+
+    if len(parts) == 3 and parts[:2] == ["cron", "jobs"] and request.method == "DELETE":
+        response = await _hermes_request("DELETE", base_url, f"/api/jobs/{parts[2]}")
+        payload = _safe_json_payload(response)
+        return JSONResponse(status_code=response.status_code, content=payload or {"ok": True})
+
+    if len(parts) == 4 and parts[:2] == ["cron", "jobs"] and request.method == "POST":
+        if parts[3] == "run":
+            response = await _hermes_request("POST", base_url, f"/api/jobs/{parts[2]}/run")
+        else:
+            return JSONResponse(status_code=404, content={"detail": "Unsupported Hermes cron action"})
+        payload = _safe_json_payload(response)
+        return JSONResponse(status_code=response.status_code, content=payload or {"ok": True})
+
+    if len(parts) == 4 and parts[:2] == ["cron", "jobs"] and parts[3] == "toggle" and request.method == "PUT":
+        body = json.loads((await request.body()) or b"{}")
+        action = "resume" if body.get("enabled") else "pause"
+        response = await _hermes_request("POST", base_url, f"/api/jobs/{parts[2]}/{action}")
+        payload = _safe_json_payload(response)
+        job = payload.get("job") if isinstance(payload, dict) else None
+        return JSONResponse(
+            status_code=response.status_code,
+            content=_hermes_job_to_openclaw_cron_job(job) if isinstance(job, dict) else payload,
+        )
+
+    return JSONResponse(status_code=404, content={"detail": "Unsupported Hermes cron compatibility path"})
+
+
+def _hermes_empty_compat(path: str, request: Request) -> JSONResponse | None:
+    if path == "commands" and request.method == "GET":
+        agent_id = request.query_params.get("agentId") or "main"
+        return JSONResponse(
+            {
+                "agentId": agent_id,
+                "commands": [],
+                "runtime": "hermes",
+                "compatibility": "openclaw-empty",
+            }
+        )
+    if path == "channels/status" and request.method == "GET":
+        return JSONResponse(
+            {
+                "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
+                "channelOrder": [],
+                "channelLabels": {},
+                "channelDetailLabels": {},
+                "channelSystemImages": {},
+                "channelMeta": [],
+                "channels": {},
+                "channelAccounts": {},
+                "channelDefaultAccountId": {},
+                "runtime": "hermes",
+            }
+        )
+    if path == "channels/configured" and request.method == "GET":
+        return JSONResponse({"success": True, "channels": [], "runtime": "hermes"})
+    if path.startswith("channels/") and path.endswith("/config"):
+        if request.method == "GET":
+            return JSONResponse({"config": None, "runtime": "hermes"})
+        if request.method in {"PUT", "DELETE"}:
+            return JSONResponse({"ok": False, "runtime": "hermes", "detail": "Hermes channel config is not exposed through OpenClaw compatibility API"})
+    if path.startswith("channels/") and path.endswith("/logout") and request.method == "POST":
+        return JSONResponse({"ok": False, "runtime": "hermes", "detail": "Hermes channel logout is not exposed through OpenClaw compatibility API"})
+    if path == "plugins" and request.method == "GET":
+        return JSONResponse([])
+    if path == "plugins/install" and request.method == "POST":
+        return JSONResponse({"ok": False, "output": "Hermes runtime does not expose OpenClaw plugin installation API"})
+    if path.startswith("plugins/") and request.method == "DELETE":
+        return JSONResponse({"ok": False, "runtime": "hermes"})
+    if path == "nodes" and request.method == "GET":
+        return JSONResponse({"nodes": [], "pending": [], "paired": [], "runtime": "hermes"})
+    if path.startswith("nodes/") and request.method in {"GET", "POST", "DELETE"}:
+        return JSONResponse({"ok": False, "runtime": "hermes"})
+    if path == "marketplaces/skills/search" and request.method == "POST":
+        return JSONResponse({"results": [], "runtime": "hermes"})
+    if path in {"marketplaces/skills/install", "marketplaces/recommended/install", "marketplaces/git/install-skills"} and request.method == "POST":
+        return JSONResponse({"ok": False, "output": "Hermes runtime does not expose OpenClaw marketplace installation API", "installed": [], "errors": []})
+    if path == "marketplaces/recommended" and request.method == "GET":
+        return JSONResponse({"categories": [], "runtime": "hermes"})
+    if path == "marketplaces/git/scan-skills" and request.method == "POST":
+        return JSONResponse({"repo": "", "repoName": "", "skills": [], "cacheKey": "", "runtime": "hermes"})
+    if path == "settings/gateway/restart" and request.method == "POST":
+        return JSONResponse({"success": False, "message": "Hermes runtime restart is managed by the platform container lifecycle"})
+    if path == "models/config" and request.method == "PUT":
+        return JSONResponse({"ok": False, "runtime": "hermes", "detail": "Hermes model config is controlled by platform environment variables"})
+    if path == "filemanager/browse" and request.method == "GET":
+        requested_path = request.query_params.get("path", "")
+        return JSONResponse({"type": "directory", "path": requested_path, "root": "/opt/data", "items": [], "runtime": "hermes"})
+    if path in {"filemanager/delete", "filemanager/mkdir"} and request.method in {"DELETE", "POST"}:
+        return JSONResponse({"ok": False, "runtime": "hermes", "detail": "Hermes file mutation is limited to upload and serve compatibility endpoints"})
+    return None
 
 
 async def _container_url(db: AsyncSession, user: User) -> str:
@@ -49,7 +339,7 @@ async def container_info(
     if container is None:
         return {"container_name": None, "status": "none", "docker_id": None}
     short_id = user.id[:8]
-    prefix = (settings.dedicated_runtime_container_name_prefix or "openclaw-user").strip() or "openclaw-user"
+    prefix = settings.dedicated_runtime_container_name_prefix
     container_name = f"{prefix}-{short_id}"
 
     # Get real Docker status and port mappings
@@ -130,7 +420,7 @@ async def container_doctor_fix(
         raise HTTPException(status_code=404, detail="No container found")
 
     short_id = user.id[:8]
-    volume_prefix = (settings.dedicated_runtime_data_volume_prefix or "openclaw-data").strip() or "openclaw-data"
+    volume_prefix = settings.dedicated_runtime_data_volume_prefix
     volume_name = f"{volume_prefix}-{short_id}"
 
     try:
@@ -244,7 +534,6 @@ async def container_doctor_fix(
 async def _proxy_file_request(request: Request, token: str, bridge_path: str):
     """Shared helper: authenticate via query-param or header, then proxy to runtime."""
     from app.auth.service import decode_token, get_user_by_id
-    from fastapi.responses import Response
 
     # Try query-param token first, fall back to Authorization header
     user = None
@@ -327,10 +616,28 @@ async def proxy_http(
     db: AsyncSession = Depends(get_db),
 ):
     """Forward HTTP requests to the user's openclaw container."""
+    path = path.strip("/")
+    if _dedicated_runtime_backend() == "hermes":
+        empty_compat = _hermes_empty_compat(path, request)
+        if empty_compat is not None:
+            return empty_compat
+
     base_url = await _container_url(db, user)
     # Close the session explicitly so the connection returns to the pool
     # before the potentially long upstream call (up to 120s).
-    await db.close()
+    close_db = getattr(db, "close", None)
+    if close_db is not None:
+        await close_db()
+
+    if _dedicated_runtime_backend() == "hermes":
+        if path == "status" and request.method == "GET":
+            return await _proxy_hermes_status(base_url)
+        if path == "models" and request.method == "GET":
+            return await _proxy_hermes_models(base_url)
+        if path == "models/config" and request.method == "PUT":
+            return _hermes_empty_compat(path, request)
+        if path == "cron/jobs" or path.startswith("cron/jobs/"):
+            return await _proxy_hermes_cron(path, request, base_url)
 
     target_url = f"{base_url}/api/{path}"
 
@@ -403,6 +710,7 @@ async def proxy_websocket(
     await websocket.accept()
 
     import asyncio
+
     import websockets
 
     try:
@@ -483,6 +791,7 @@ async def proxy_terminal_websocket(
     await websocket.accept()
 
     import asyncio
+
     import websockets
 
     try:

@@ -44,6 +44,14 @@ async def list_dedicated_skills(
     return await backend.list_skills(RuntimeContext(user=user, scope="dedicated"))
 
 
+@router.post("/api/openclaw/runtime/prewarm")
+async def prewarm_dedicated_runtime(
+    user: User = Depends(get_current_user),
+):
+    backend = get_runtime_backend(user)
+    return await backend.prewarm(RuntimeContext(user=user, scope="dedicated"))
+
+
 @router.get("/api/openclaw/sessions")
 async def list_dedicated_sessions(
     user: User = Depends(get_current_user),
@@ -146,6 +154,14 @@ async def get_shared_me(
     _ = db
     backend = get_runtime_backend(user)
     return await backend.get_agent_info(RuntimeContext(user=user, scope="shared"))
+
+
+@router.post("/api/shared-openclaw/runtime/prewarm")
+async def prewarm_shared_runtime(
+    user: User = Depends(get_current_user),
+):
+    backend = get_runtime_backend(user)
+    return await backend.prewarm(RuntimeContext(user=user, scope="shared"))
 
 
 @router.get("/api/shared-openclaw/sessions")

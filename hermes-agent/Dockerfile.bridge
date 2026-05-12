@@ -5,6 +5,11 @@ FROM ${DEBIAN_IMAGE} AS runtime
 
 ENV PYTHONUNBUFFERED=1
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+ARG HERMES_INSTALL_BROWSER=false
+ARG HERMES_INSTALL_WHATSAPP_BRIDGE=false
+ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 
 # Use domestic mirror for apt
 RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources && \
@@ -28,16 +33,23 @@ RUN git config --global --add url."https://github.com/".insteadOf "git@github.co
 RUN npm config set fetch-retries 5 && \
     npm config set fetch-retry-mintimeout 20000 && \
     npm config set fetch-retry-maxtimeout 120000 && \
-    npm config set registry https://registry.npmmirror.com
+    npm config set registry ${NPM_REGISTRY}
 
 COPY --chown=hermes:hermes package.json package-lock.json ./
-ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
-RUN npm install --prefer-offline --no-audit --no-fund && \
-    npx playwright install --with-deps chromium
+RUN if [ "$HERMES_INSTALL_BROWSER" = "true" ]; then \
+        npm install --prefer-offline --no-audit --no-fund; \
+        npx playwright install --with-deps chromium --only-shell; \
+    else \
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PUPPETEER_SKIP_DOWNLOAD=1 npm install --prefer-offline --no-audit --no-fund --ignore-scripts; \
+        echo "Skipping Playwright Chromium install; rebuild with HERMES_INSTALL_BROWSER=true to include browser tools."; \
+    fi
 
 COPY --chown=hermes:hermes scripts/whatsapp-bridge/package.json scripts/whatsapp-bridge/package-lock.json ./scripts/whatsapp-bridge/
-RUN cd /opt/hermes/scripts/whatsapp-bridge && \
-    npm install --prefer-offline --no-audit --no-fund
+RUN if [ "$HERMES_INSTALL_WHATSAPP_BRIDGE" = "true" ]; then \
+        cd /opt/hermes/scripts/whatsapp-bridge && npm install --prefer-offline --no-audit --no-fund; \
+    else \
+        echo "Skipping WhatsApp bridge npm install; rebuild with HERMES_INSTALL_WHATSAPP_BRIDGE=true to include WhatsApp bridge dependencies."; \
+    fi
 
 USER root
 COPY --chown=hermes:hermes pyproject.toml requirements.txt ./

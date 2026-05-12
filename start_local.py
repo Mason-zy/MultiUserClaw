@@ -399,7 +399,13 @@ def start_gateway(env: dict) -> "subprocess.Popen | None":
 
     # 从项目根目录 .env 读取配置并注入 PLATFORM_ 前缀
     # 需要转发的变量：所有 *_API_KEY、*_API_BASE、JWT_SECRET、DEFAULT_MODEL
-    _EXTRA_ENV_KEYS = {"JWT_SECRET", "DEFAULT_MODEL", "ADMIN_USERNAME", "ADMIN_PASSWORD"}
+    _EXTRA_ENV_KEYS = {
+        "JWT_SECRET",
+        "DEFAULT_MODEL",
+        "ADMIN_USERNAME",
+        "ADMIN_PASSWORD",
+        "MINIMAX_M27_USE_HIGHSPEED",
+    }
     env_path = os.path.join(PROJECT_DIR, ".env")
     if os.path.exists(env_path):
         with open(env_path, encoding='utf-8') as f:

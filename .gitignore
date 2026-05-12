@@ -63,6 +63,7 @@ cache
 # Local planning and agent scratch docs. Use `git add -f docs/<path>` for shared docs.
 docs/
 openclaw/bridge-deploy-copy
+hermes-agent/deploy-copy
 openclaw/dist-runtime
 simple_front/dist
 openclaw/packages/libsignal-node/

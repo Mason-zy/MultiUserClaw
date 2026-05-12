@@ -1,12 +1,11 @@
 """SQLAlchemy ORM models for the platform."""
 
-from datetime import datetime
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
     DateTime,
-    Float,
     Integer,
     String,
     Text,
@@ -85,6 +84,20 @@ class SharedAgentBinding(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class RuntimeRun(Base):
+    """Ownership mapping for async runtime runs started through shared backends."""
+
+    __tablename__ = "runtime_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    session_key: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    runtime_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    backend: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class UsageRecord(Base):

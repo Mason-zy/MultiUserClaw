@@ -5,6 +5,33 @@ set -e
 HERMES_HOME="/opt/data"
 INSTALL_DIR="/opt/hermes"
 
+sync_nanobot_packaged_skills() {
+    if [ "${NANOBOT_PACKAGED_SKILLS_SYNCED:-}" = "1" ]; then
+        return 0
+    fi
+
+    local src_skills="$INSTALL_DIR/deploy_copy/skills"
+    local dst_skills="$HERMES_HOME/skills"
+    if [ ! -d "$src_skills" ]; then
+        return 0
+    fi
+
+    mkdir -p "$dst_skills"
+    echo "Syncing Nanobot packaged skills into $dst_skills"
+    while IFS= read -r -d '' skill_src; do
+        local skill_name
+        local skill_dst
+        skill_name="$(basename "$skill_src")"
+        skill_dst="$dst_skills/$skill_name"
+        rm -rf -- "$skill_dst"
+        cp -a -- "$skill_src" "$dst_skills/"
+        if [ "$(id -u)" = "0" ]; then
+            chown -R hermes:hermes "$skill_dst"
+        fi
+    done < <(find "$src_skills" -mindepth 1 -maxdepth 1 -type d -print0)
+    export NANOBOT_PACKAGED_SKILLS_SYNCED=1
+}
+
 # --- Privilege dropping via gosu ---
 # When started as root (the default), optionally remap the hermes user/group
 # to match host-side ownership, fix volume permissions, then re-exec as hermes.
@@ -20,6 +47,10 @@ if [ "$(id -u)" = "0" ]; then
     fi
 
     mkdir -p "$HERMES_HOME"
+    if ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        ln -sf /usr/bin/python3 /usr/local/bin/python
+    fi
+    sync_nanobot_packaged_skills
 
     actual_hermes_uid=$(id -u hermes)
     actual_hermes_gid=$(id -g hermes)
@@ -52,6 +83,7 @@ export PYTHONPATH="$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}"
 # ssh, gh, npm …).  Without it those tools write to /root which is
 # ephemeral and shared across profiles.  See issue #4426.
 mkdir -p "$HERMES_HOME"/{cron,sessions,logs,hooks,memories,skills,skins,plans,workspace,home}
+sync_nanobot_packaged_skills
 
 # .env
 if [ ! -f "$HERMES_HOME/.env" ]; then
@@ -98,6 +130,8 @@ proxy_url = os.environ.get('NANOBOT_PROXY__URL', '').strip()
 proxy_token = os.environ.get('NANOBOT_PROXY__TOKEN', '').strip()
 default_model = os.environ.get('NANOBOT_AGENTS__DEFAULTS__MODEL', '').strip()
 api_toolsets_raw = os.environ.get('HERMES_API_TOOLSETS', '').strip()
+reasoning_effort_raw = os.environ.get('HERMES_REASONING_EFFORT', '').strip()
+service_tier_raw = os.environ.get('HERMES_SERVICE_TIER', '').strip()
 
 if not proxy_url or not proxy_token:
     sys.exit(0)
@@ -150,6 +184,12 @@ api_toolsets = parse_api_toolsets(api_toolsets_raw)
 if api_toolsets is not None:
     config.setdefault('platform_toolsets', {})['api_server'] = api_toolsets
 
+if reasoning_effort_raw:
+    config.setdefault('agent', {})['reasoning_effort'] = reasoning_effort_raw
+
+if service_tier_raw:
+    config.setdefault('agent', {})['service_tier'] = service_tier_raw
+
 # Save updated config
 try:
     with open(config_path, 'w') as f:
@@ -174,5 +214,6 @@ if [ -d "$INSTALL_DIR/skills" ]; then
 fi
 
 # Avoid relying on editable-install console-script metadata at runtime.
-# Launch from the repo entrypoint so /opt/hermes is on sys.path.
-exec "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/hermes" "$@"
+# Launch through the Nanobot wrapper so compatibility overlays are installed
+# before Hermes dispatches subcommands such as "gateway run".
+exec "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/nanobot_hermes.py" "$@"

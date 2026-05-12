@@ -4,18 +4,21 @@ Receives OpenAI-compatible requests from user containers (authenticated
 by container token), injects the real API key, records usage, enforces
 quotas, and forwards to the actual LLM provider.
 
-Design: pass-through proxy. We only extract `model` for routing and `stream`
-for response handling. All other parameters (messages, tools, temperature,
-max_tokens, max_completion_tokens, reasoning_effort, thinking, top_p,
-response_format, etc.) are forwarded as-is to litellm/provider.
+Design: pass-through proxy with platform defaults. We extract `model` for
+routing and `stream` for response handling. Other parameters (messages, tools,
+temperature, max_tokens, max_completion_tokens, reasoning_effort, thinking,
+top_p, response_format, etc.) are forwarded as-is to litellm/provider, with
+platform reasoning/speed defaults filled only when the request omits them.
 """
 
 from __future__ import annotations
 
-import time
 import logging
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
+from functools import lru_cache
 
+import litellm
 from fastapi import HTTPException, status
 from litellm import acompletion
 from sqlalchemy import func, select
@@ -140,6 +143,12 @@ def _get_provider_key_base_and_headers(provider: dict) -> tuple[str, str | None,
     return api_key, api_base, None
 
 
+def _maybe_use_minimax_highspeed(model: str) -> str:
+    if settings.minimax_m27_use_highspeed and model.lower() == "minimax-m2.7":
+        return "MiniMax-M2.7-highspeed"
+    return model
+
+
 def _resolve_provider(model: str) -> tuple[str, str, str | None, dict[str, str] | None]:
     """Return (litellm_model_name, api_key, api_base_or_None, extra_headers_or_None)."""
     model_lower = model.lower()
@@ -152,6 +161,8 @@ def _resolve_provider(model: str) -> tuple[str, str, str | None, dict[str, str] 
             actual_model = model.split("/", 1)[1]
             api_key, api_base, extra_headers = _get_provider_key_base_and_headers(provider)
             if api_key or extra_headers:
+                if provider["prefix"] == "minimax":
+                    actual_model = _maybe_use_minimax_highspeed(actual_model)
                 litellm_model = provider["litellm_fmt"].format(model=actual_model)
                 logger.info("模型路由: %s → %s (litellm=%s)", model, prefix, litellm_model)
                 return litellm_model, api_key, api_base, extra_headers
@@ -162,6 +173,8 @@ def _resolve_provider(model: str) -> tuple[str, str, str | None, dict[str, str] 
             api_key, api_base, extra_headers = _get_provider_key_base_and_headers(provider)
             if api_key or extra_headers:
                 actual_model = model.split("/", 1)[1] if "/" in model else model
+                if provider["prefix"] == "minimax":
+                    actual_model = _maybe_use_minimax_highspeed(actual_model)
                 litellm_model = provider["litellm_fmt"].format(model=actual_model)
                 logger.info("模型路由: %s → %s (keyword=%r, litellm=%s)", model, provider["prefix"], keyword, litellm_model)
                 return litellm_model, api_key, api_base, extra_headers
@@ -175,7 +188,7 @@ def _resolve_provider(model: str) -> tuple[str, str, str | None, dict[str, str] 
         return f"openrouter/{model}", settings.openrouter_api_key, None, None
 
     raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        status_code=status.HTTP_400_BAD_REQUEST,
         detail=f"No provider configured for model '{model}'",
     )
 
@@ -241,6 +254,57 @@ _LITELLM_PASSTHROUGH_KEYS = {
     "top_logprobs",
     "stream_options",
 }
+
+
+def _nonempty_setting(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+@lru_cache(maxsize=128)
+def _supported_openai_params_for_model(litellm_model: str) -> tuple[str, ...]:
+    return tuple(litellm.get_supported_openai_params(model=litellm_model) or [])
+
+
+def _litellm_model_supports_param(litellm_model: str, api_base: str | None, param: str) -> bool:
+    try:
+        supported = _supported_openai_params_for_model(litellm_model)
+    except Exception as exc:
+        logger.debug("Could not resolve supported LiteLLM params for %s: %s", litellm_model, exc)
+        return False
+
+    if param not in supported:
+        return False
+
+    # The proxy maps several OpenAI-compatible providers through `openai/<model>`
+    # with a custom api_base. LiteLLM's OpenAI param list can be broader than
+    # those upstream-compatible endpoints, so don't add reasoning defaults there
+    # unless the caller explicitly sent them.
+    if param == "reasoning_effort" and litellm_model.lower().startswith("openai/") and api_base:
+        return False
+
+    return True
+
+
+def _apply_platform_generation_defaults(kwargs: dict, litellm_model: str, api_base: str | None) -> None:
+    """Apply platform runtime defaults without overriding explicit request knobs."""
+    reasoning_effort = _nonempty_setting(settings.hermes_reasoning_effort)
+    if (
+        reasoning_effort
+        and "reasoning_effort" not in kwargs
+        and "thinking" not in kwargs
+        and _litellm_model_supports_param(litellm_model, api_base, "reasoning_effort")
+    ):
+        kwargs["reasoning_effort"] = reasoning_effort
+
+    service_tier = _nonempty_setting(settings.hermes_service_tier)
+    if (
+        service_tier
+        and "service_tier" not in kwargs
+        and _litellm_model_supports_param(litellm_model, api_base, "service_tier")
+    ):
+        kwargs["service_tier"] = service_tier
 
 
 async def proxy_chat_completion(
@@ -317,6 +381,8 @@ async def proxy_chat_completion(
     for key in _LITELLM_PASSTHROUGH_KEYS:
         if key in raw_request:
             kwargs[key] = raw_request[key]
+
+    _apply_platform_generation_defaults(kwargs, litellm_model, api_base)
 
     # Ensure streaming usage is reported
     if stream:

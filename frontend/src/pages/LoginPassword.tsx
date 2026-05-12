@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
-import { login } from '../lib/api'
+import { login, prewarmRuntime } from '../lib/api'
 
 export default function LoginPassword() {
   const navigate = useNavigate()
@@ -17,6 +17,7 @@ export default function LoginPassword() {
 
     try {
       await login(username, password)
+      void prewarmRuntime().catch(() => {})
       navigate('/dashboard', { replace: true })
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : '登录失败'

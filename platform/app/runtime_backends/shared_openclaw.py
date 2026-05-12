@@ -24,6 +24,11 @@ class SharedOpenClawBackend(RuntimeBackend):
     async def _context_for_user(self, db: AsyncSession, user: User):
         return await ensure_shared_agent_binding(db, user)
 
+    async def prewarm(self, ctx: RuntimeContext) -> dict:
+        async with async_session() as db:
+            await self._context_for_user(db, ctx.user)
+        return {"ok": True, "status": "ready", "runtime": "openclaw"}
+
     async def get_agent_info(self, ctx: RuntimeContext) -> dict:
         async with async_session() as db:
             shared_ctx = await self._context_for_user(db, ctx.user)

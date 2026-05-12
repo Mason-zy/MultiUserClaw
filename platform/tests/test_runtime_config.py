@@ -12,6 +12,9 @@ def test_settings_expose_dedicated_runtime_selector_fields():
     assert settings.dedicated_runtime_data_volume_prefix == "hermes-data"
     assert settings.hermes_connect_retries == 60
     assert settings.hermes_retry_delay_seconds == 0.5
+    assert settings.hermes_reasoning_effort == "none"
+    assert settings.hermes_service_tier == ""
+    assert settings.minimax_m27_use_highspeed is True
 
 
 def test_settings_expose_shared_runtime_selector_fields():

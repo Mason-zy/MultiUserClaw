@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import time
 from typing import Any
 
 import httpx
@@ -19,6 +22,8 @@ from app.runtime_backends.hermes_files import (
 )
 from app.runtime_backends.hermes_run import (
     HermesEventSanitizer,
+    HermesRunTimingTracker,
+    format_latency_ms,
     sanitize_hermes_message,
     sanitize_hermes_messages,
     sanitize_run_events,
@@ -27,16 +32,62 @@ from app.runtime_backends.hermes_run import (
 )
 from app.runtime_backends.hermes_skills import list_skills_from_hermes_container
 
+logger = logging.getLogger(__name__)
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 1)
+
 
 class DedicatedHermesBackend:
     def __init__(self, base_url: str | None = None):
         self._base_url_override = base_url
+        self._api_ready_keys: set[tuple[str, str]] = set()
+        self._api_ready_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._clients: dict[tuple[str, str, int, float], HermesClient] = {}
+
+    async def aclose(self) -> None:
+        for client in self._clients.values():
+            await client.aclose()
+        self._clients.clear()
+
+    async def _wait_for_api_ready(
+        self,
+        ctx: RuntimeContext,
+        base_url: str,
+        runtime_id: str = "",
+    ) -> None:
+        ready_key = (base_url, runtime_id)
+        if ready_key in self._api_ready_keys:
+            return
+        lock = self._api_ready_locks.setdefault(ready_key, asyncio.Lock())
+        async with lock:
+            if ready_key in self._api_ready_keys:
+                return
+            started_at = time.perf_counter()
+            client = HermesClient(
+                base_url=base_url,
+                api_key=settings.dedicated_hermes_api_key,
+                connect_retries=settings.hermes_connect_retries,
+                retry_delay_seconds=settings.hermes_retry_delay_seconds,
+            )
+            await client.get_models()
+            self._api_ready_keys.add(ready_key)
+            logger.info(
+                "hermes_api_ready scope=%s user_id=%s elapsed_ms=%.1f base_url=%s runtime_id=%s",
+                ctx.scope,
+                ctx.user.id,
+                _elapsed_ms(started_at),
+                base_url,
+                runtime_id,
+            )
 
     async def _resolve_base_url(self, ctx: RuntimeContext) -> str:
         if self._base_url_override:
             return self._base_url_override.rstrip("/")
         if settings.dev_openclaw_url:
             return settings.dev_openclaw_url.rstrip("/")
+        started_at = time.perf_counter()
         async with async_session() as db:
             container = await ensure_running(db, ctx.user.id)
         if not container.internal_host or not container.internal_port:
@@ -44,19 +95,45 @@ class DedicatedHermesBackend:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Hermes runtime address is unavailable",
             )
-        return f"http://{container.internal_host}:{container.internal_port}"
+        logger.info(
+            "hermes_runtime_ready scope=%s user_id=%s elapsed_ms=%.1f host=%s port=%s",
+            ctx.scope,
+            ctx.user.id,
+            _elapsed_ms(started_at),
+            container.internal_host,
+            container.internal_port,
+        )
+        base_url = f"http://{container.internal_host}:{container.internal_port}"
+        runtime_id = str(getattr(container, "docker_id", "") or "")
+        await self._wait_for_api_ready(ctx, base_url, runtime_id)
+        return base_url
 
     async def _client(self, ctx: RuntimeContext) -> HermesClient:
-        return HermesClient(
-            base_url=await self._resolve_base_url(ctx),
-            api_key=settings.dedicated_hermes_api_key,
-            connect_retries=settings.hermes_connect_retries,
-            retry_delay_seconds=settings.hermes_retry_delay_seconds,
+        base_url = await self._resolve_base_url(ctx)
+        key = (
+            base_url,
+            settings.dedicated_hermes_api_key,
+            settings.hermes_connect_retries,
+            settings.hermes_retry_delay_seconds,
         )
+        client = self._clients.get(key)
+        if client is None:
+            client = HermesClient(
+                base_url=base_url,
+                api_key=settings.dedicated_hermes_api_key,
+                connect_retries=settings.hermes_connect_retries,
+                retry_delay_seconds=settings.hermes_retry_delay_seconds,
+            )
+            self._clients[key] = client
+        return client
 
     async def _request(self, ctx: RuntimeContext, method: str, path: str, **kwargs) -> Any:
         client = await self._client(ctx)
         return await client.request(method, path, **kwargs)
+
+    async def prewarm(self, ctx: RuntimeContext) -> dict:
+        await self._resolve_base_url(ctx)
+        return {"ok": True, "status": "ready", "runtime": "hermes"}
 
     async def _session_record(self, ctx: RuntimeContext, session_key: str) -> dict[str, Any]:
         payload = await self._request(ctx, "GET", f"/api/hermes/sessions/{session_key}")
@@ -78,7 +155,20 @@ class DedicatedHermesBackend:
     async def get_agent_info(self, ctx: RuntimeContext) -> dict:
         payload = await (await self._client(ctx)).get_models()
         models = payload.get("data") if isinstance(payload, dict) else []
-        return {"agents": models if isinstance(models, list) else []}
+        agents = models if isinstance(models, list) else []
+        default_id = ""
+        for item in agents:
+            if isinstance(item, dict) and item.get("id"):
+                default_id = str(item["id"])
+                break
+        default_id = default_id or "hermes-agent"
+        return {
+            "agents": agents,
+            "defaultId": default_id,
+            "mainKey": f"agent:{default_id}",
+            "scope": ctx.scope,
+            "runtime_mode": ctx.user.runtime_mode,
+        }
 
     async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
         async with async_session() as db:
@@ -109,9 +199,18 @@ class DedicatedHermesBackend:
         }
 
     async def send_message(self, ctx: RuntimeContext, session_key: str, message: str) -> dict:
+        started_at = time.perf_counter()
         payload = await (await self._client(ctx)).create_run(message=message, session_id=session_key or None)
         run_id = payload.get("run_id") if isinstance(payload, dict) else None
         effective_session_key = payload.get("session_id") if isinstance(payload, dict) else None
+        logger.info(
+            "hermes_run_started scope=%s user_id=%s session_key=%s run_id=%s elapsed_ms=%.1f",
+            ctx.scope,
+            ctx.user.id,
+            effective_session_key or session_key,
+            run_id or "",
+            _elapsed_ms(started_at),
+        )
         return {
             "ok": True,
             "run_id": run_id or "",
@@ -122,9 +221,28 @@ class DedicatedHermesBackend:
         }
 
     async def wait_run(self, ctx: RuntimeContext, run_id: str, timeout_ms: int):
-        events = await (await self._client(ctx)).collect_run_events(run_id, timeout_ms=timeout_ms)
+        started_at = time.perf_counter()
+        timing = HermesRunTimingTracker(lambda: _elapsed_ms(started_at))
+
+        events = await (await self._client(ctx)).collect_run_events(
+            run_id,
+            timeout_ms=timeout_ms,
+            on_event=timing.record,
+        )
         events = sanitize_run_events(events)
         status_text, final_message = summarize_run_events(events)
+        logger.info(
+            "hermes_run_finished scope=%s user_id=%s run_id=%s status=%s first_event_ms=%s first_delta_ms=%s first_visible_delta_ms=%s elapsed_ms=%.1f event_count=%d",
+            ctx.scope,
+            ctx.user.id,
+            run_id,
+            status_text,
+            format_latency_ms(timing.first_event_ms),
+            format_latency_ms(timing.first_delta_ms),
+            format_latency_ms(timing.first_visible_delta_ms),
+            _elapsed_ms(started_at),
+            len(events),
+        )
         return {
             "run_id": run_id,
             "status": status_text,

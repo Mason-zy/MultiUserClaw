@@ -1,4 +1,5 @@
 import io
+import logging
 import sys
 import tarfile
 import types
@@ -49,12 +50,16 @@ class FakeAsyncClient:
         self.stream_map = stream_map or {}
         self.capture = capture if capture is not None else []
         self.timeout = timeout
+        self.is_closed = False
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         return None
+
+    async def aclose(self):
+        self.is_closed = True
 
     async def request(self, method, url, **kwargs):
         self.capture.append((method, url, kwargs))
@@ -162,6 +167,39 @@ async def test_hermes_client_sends_bearer_auth_header(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hermes_client_create_run_sends_session_key_header(monkeypatch):
+    from app.hermes_client import HermesClient
+
+    captured = []
+
+    def fake_client(*args, **kwargs):
+        return FakeAsyncClient(
+            response_map={
+                ("POST", "http://hermes.local/v1/runs"): FakeResponse(
+                    status_code=202,
+                    json_data={"run_id": "run-123", "status": "started"},
+                )
+            },
+            capture=captured,
+        )
+
+    monkeypatch.setattr("app.hermes_client.httpx.AsyncClient", fake_client)
+
+    client = HermesClient(base_url="http://hermes.local", api_key="bridge-key")
+    payload = await client.create_run(
+        message="Hi",
+        session_id="agent:usr_sharedagent:sess-1",
+        session_key="agent:usr_sharedagent:sess-1",
+    )
+
+    assert payload["run_id"] == "run-123"
+    assert captured[0][2]["headers"] == {
+        "Authorization": "Bearer bridge-key",
+        "X-Hermes-Session-Key": "agent:usr_sharedagent:sess-1",
+    }
+
+
+@pytest.mark.asyncio
 async def test_hermes_client_retries_connect_errors(monkeypatch):
     from app.hermes_client import HermesClient
 
@@ -197,6 +235,41 @@ async def test_hermes_client_retries_connect_errors(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hermes_client_reuses_async_client_for_request_and_stream(monkeypatch):
+    from app.hermes_client import HermesClient
+
+    captured = []
+    created = []
+
+    def fake_client(*args, **kwargs):
+        created.append(kwargs)
+        return FakeAsyncClient(
+            response_map={
+                ("GET", "http://hermes.local/v1/models"): FakeResponse(
+                    json_data={"data": [{"id": "hermes-agent"}]}
+                ),
+            },
+            stream_map={
+                ("GET", "http://hermes.local/v1/runs/run-1/events"): FakeStreamResponse(
+                    [b'data: {"type":"run.completed","output":"ok"}\n\n']
+                ),
+            },
+            capture=captured,
+        )
+
+    monkeypatch.setattr("app.hermes_client.httpx.AsyncClient", fake_client)
+
+    client = HermesClient(base_url="http://hermes.local")
+    await client.get_models()
+    await client.collect_run_events("run-1")
+    await client.aclose()
+
+    assert len(created) == 1
+    assert captured[0][0] == "GET"
+    assert captured[1][0] == "STREAM GET"
+
+
+@pytest.mark.asyncio
 async def test_dedicated_hermes_get_agent_info_uses_models_endpoint(monkeypatch, dedicated_user):
     from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
 
@@ -209,7 +282,13 @@ async def test_dedicated_hermes_get_agent_info_uses_models_endpoint(monkeypatch,
 
     payload = await backend.get_agent_info(RuntimeContext(user=dedicated_user, scope="dedicated"))
 
-    assert payload == {"agents": [{"id": "hermes-agent", "object": "model"}]}
+    assert payload == {
+        "agents": [{"id": "hermes-agent", "object": "model"}],
+        "defaultId": "hermes-agent",
+        "mainKey": "agent:hermes-agent",
+        "scope": "dedicated",
+        "runtime_mode": "dedicated",
+    }
 
 
 @pytest.mark.asyncio
@@ -339,6 +418,21 @@ async def test_shared_hermes_get_agent_info_uses_models_endpoint(monkeypatch, sh
     }
 
 
+@pytest.mark.asyncio
+async def test_dedicated_hermes_reuses_client_for_same_runtime(monkeypatch, dedicated_user):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.settings.dedicated_hermes_api_key", "bridge-key")
+
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+    ctx = RuntimeContext(user=dedicated_user, scope="dedicated")
+
+    first = await backend._client(ctx)
+    second = await backend._client(ctx)
+
+    assert second is first
+
+
 def test_shared_hermes_client_uses_platform_api_key(monkeypatch):
     from app.runtime_backends.shared_hermes import SharedHermesBackend
 
@@ -360,6 +454,17 @@ def test_shared_hermes_client_uses_platform_api_key(monkeypatch):
     assert client.api_key == "shared-key"
     assert client.connect_retries == 12
     assert client.retry_delay_seconds == 0.1
+
+
+def test_shared_hermes_reuses_client_for_same_runtime(monkeypatch):
+    from app.runtime_backends.shared_hermes import SharedHermesBackend
+
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.settings.shared_hermes_url", "http://shared-hermes")
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.settings.shared_hermes_api_key", "shared-key", raising=False)
+
+    backend = SharedHermesBackend()
+
+    assert backend._client() is backend._client()
 
 
 @pytest.mark.asyncio
@@ -396,6 +501,40 @@ async def test_dedicated_hermes_send_message_starts_run_with_session_id(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_dedicated_hermes_send_message_logs_run_start_latency(
+    monkeypatch,
+    caplog,
+    dedicated_user,
+):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    times = iter([10.0, 10.125])
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.time.perf_counter", lambda: next(times))
+
+    async def fake_create_run(self, *, message, session_id):
+        assert message == "Hi"
+        assert session_id == "sess-123"
+        return {"run_id": "run-123", "session_id": session_id, "status": "started"}
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.create_run", fake_create_run)
+
+    caplog.set_level(logging.INFO, logger="app.runtime_backends.dedicated_hermes")
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    await backend.send_message(
+        RuntimeContext(user=dedicated_user, scope="dedicated"),
+        session_key="sess-123",
+        message="Hi",
+    )
+
+    assert "hermes_run_started" in caplog.text
+    assert "scope=dedicated" in caplog.text
+    assert "user_id=u-hermes" in caplog.text
+    assert "run_id=run-123" in caplog.text
+    assert "elapsed_ms=125.0" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_dedicated_hermes_client_uses_platform_api_key(monkeypatch, dedicated_user):
     from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
 
@@ -416,14 +555,105 @@ async def test_dedicated_hermes_client_uses_platform_api_key(monkeypatch, dedica
 
 
 @pytest.mark.asyncio
+async def test_dedicated_hermes_base_url_waits_for_api_once(monkeypatch, dedicated_user):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    class FakeContainer:
+        docker_id = "docker-a"
+        internal_host = "172.22.0.10"
+        internal_port = 18080
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def fake_ensure_running(db, user_id):
+        assert user_id == dedicated_user.id
+        return FakeContainer()
+
+    ready_checks = []
+
+    async def fake_get_models(self):
+        ready_checks.append((self.base_url, self.api_key))
+        return {"data": [{"id": "hermes-agent"}]}
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.ensure_running", fake_ensure_running)
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.settings.dedicated_hermes_api_key", "bridge-key")
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.get_models", fake_get_models)
+
+    backend = DedicatedHermesBackend()
+    ctx = RuntimeContext(user=dedicated_user, scope="dedicated")
+
+    assert await backend._resolve_base_url(ctx) == "http://172.22.0.10:18080"
+    assert await backend._resolve_base_url(ctx) == "http://172.22.0.10:18080"
+    assert ready_checks == [("http://172.22.0.10:18080", "bridge-key")]
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hermes_base_url_rechecks_api_after_container_recreate(
+    monkeypatch,
+    dedicated_user,
+):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    class FakeContainer:
+        internal_host = "172.22.0.10"
+        internal_port = 18080
+
+        def __init__(self, docker_id):
+            self.docker_id = docker_id
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    container_ids = iter(["docker-a", "docker-b", "docker-b"])
+
+    async def fake_ensure_running(db, user_id):
+        assert user_id == dedicated_user.id
+        return FakeContainer(next(container_ids))
+
+    ready_checks = []
+
+    async def fake_get_models(self):
+        ready_checks.append((self.base_url, self.api_key))
+        return {"data": [{"id": "hermes-agent"}]}
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.ensure_running", fake_ensure_running)
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.settings.dedicated_hermes_api_key", "bridge-key")
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.get_models", fake_get_models)
+
+    backend = DedicatedHermesBackend()
+    ctx = RuntimeContext(user=dedicated_user, scope="dedicated")
+
+    assert await backend._resolve_base_url(ctx) == "http://172.22.0.10:18080"
+    assert await backend._resolve_base_url(ctx) == "http://172.22.0.10:18080"
+    assert await backend._resolve_base_url(ctx) == "http://172.22.0.10:18080"
+    assert ready_checks == [
+        ("http://172.22.0.10:18080", "bridge-key"),
+        ("http://172.22.0.10:18080", "bridge-key"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_dedicated_hermes_wait_run_reads_sse_events(monkeypatch, dedicated_user):
     from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
 
     backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
 
-    async def fake_collect(self, run_id, timeout_ms=25000):
+    async def fake_collect(self, run_id, timeout_ms=25000, on_event=None):
         assert run_id == "run-123"
         assert timeout_ms == 9000
+        assert on_event is not None
+        on_event({"type": "message.delta", "delta": "Done"})
         return [
             {"type": "run.started"},
             {"type": "message.completed", "message": {"role": "assistant", "content": "Done"}},
@@ -446,8 +676,10 @@ async def test_dedicated_hermes_wait_run_uses_completed_output(monkeypatch, dedi
 
     backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
 
-    async def fake_collect(self, run_id, timeout_ms=25000):
+    async def fake_collect(self, run_id, timeout_ms=25000, on_event=None):
         assert run_id == "run-123"
+        if on_event is not None:
+            on_event({"type": "message.delta", "delta": "pong"})
         return [
             {"type": "message.delta", "delta": "<think>private"},
             {"type": "message.delta", "delta": " reasoning</think>\n\npong"},
@@ -464,6 +696,81 @@ async def test_dedicated_hermes_wait_run_uses_completed_output(monkeypatch, dedi
         {"type": "message.delta", "delta": "pong"},
         {"type": "run.completed", "output": "pong"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hermes_wait_run_logs_first_delta_and_total_latency(
+    monkeypatch,
+    caplog,
+    dedicated_user,
+):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    times = iter([20.0, 20.25, 21.0])
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.time.perf_counter", lambda: next(times))
+
+    async def fake_collect(self, run_id, timeout_ms=25000, on_event=None):
+        assert run_id == "run-123"
+        assert timeout_ms == 9000
+        assert on_event is not None
+        on_event({"type": "message.delta", "delta": "Hi"})
+        return [
+            {"type": "message.delta", "delta": "Hi"},
+            {"type": "run.completed", "output": "Hi"},
+        ]
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.collect_run_events", fake_collect)
+
+    caplog.set_level(logging.INFO, logger="app.runtime_backends.dedicated_hermes")
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    await backend.wait_run(RuntimeContext(user=dedicated_user, scope="dedicated"), "run-123", 9000)
+
+    assert "hermes_run_finished" in caplog.text
+    assert "scope=dedicated" in caplog.text
+    assert "user_id=u-hermes" in caplog.text
+    assert "run_id=run-123" in caplog.text
+    assert "first_delta_ms=250.0" in caplog.text
+    assert "elapsed_ms=1000.0" in caplog.text
+    assert "event_count=2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hermes_wait_run_logs_first_event_and_visible_delta_latency(
+    monkeypatch,
+    caplog,
+    dedicated_user,
+):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    times = iter([10.0, 10.1, 10.3, 10.9, 11.2])
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.time.perf_counter", lambda: next(times))
+
+    async def fake_collect(self, run_id, timeout_ms=25000, on_event=None):
+        assert run_id == "run-123"
+        assert timeout_ms == 9000
+        assert on_event is not None
+        on_event({"type": "run.started"})
+        on_event({"type": "message.delta", "delta": "<think>private"})
+        on_event({"type": "message.delta", "delta": " reasoning</think>\n\nVisible"})
+        return [
+            {"type": "run.started"},
+            {"type": "message.delta", "delta": "<think>private"},
+            {"type": "message.delta", "delta": " reasoning</think>\n\nVisible"},
+            {"type": "run.completed", "output": "<think>private reasoning</think>\n\nVisible"},
+        ]
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.collect_run_events", fake_collect)
+
+    caplog.set_level(logging.INFO, logger="app.runtime_backends.dedicated_hermes")
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    await backend.wait_run(RuntimeContext(user=dedicated_user, scope="dedicated"), "run-123", 9000)
+
+    assert "first_event_ms=100.0" in caplog.text
+    assert "first_delta_ms=300.0" in caplog.text
+    assert "first_visible_delta_ms=900.0" in caplog.text
+    assert "elapsed_ms=1200.0" in caplog.text
 
 
 def test_hermes_event_sanitizer_filters_split_thinking_delta():
@@ -509,14 +816,34 @@ def test_summarize_run_events_strips_completed_output_thinking():
 async def test_shared_hermes_wait_run_uses_completed_output(monkeypatch, shared_user):
     from app.runtime_backends.shared_hermes import SharedHermesBackend
 
-    async def fake_collect(self, run_id, timeout_ms=25000):
+    async def fake_collect(self, run_id, timeout_ms=25000, on_event=None):
         assert run_id == "run-123"
+        if on_event is not None:
+            on_event({"type": "message.delta", "delta": "pong"})
         return [
             {"type": "message.delta", "delta": "<think>private"},
             {"type": "message.delta", "delta": " reasoning</think>\n\npong"},
             {"type": "run.completed", "output": "<think>private</think>\n\npong"},
         ]
 
+    async def fake_ensure_owned(db, *, run_id, user_id, runtime_mode, backend):
+        assert run_id == "run-123"
+        assert user_id == shared_user.id
+        assert runtime_mode == "shared"
+        assert backend == "hermes"
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr(
+        "app.runtime_backends.shared_hermes.ensure_runtime_run_owned",
+        fake_ensure_owned,
+    )
     monkeypatch.setattr("app.runtime_backends.shared_hermes.HermesClient.collect_run_events", fake_collect)
 
     payload = await SharedHermesBackend().wait_run(
@@ -531,6 +858,220 @@ async def test_shared_hermes_wait_run_uses_completed_output(monkeypatch, shared_
         {"type": "message.delta", "delta": "pong"},
         {"type": "run.completed", "output": "pong"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_shared_hermes_send_message_logs_run_start_latency(monkeypatch, caplog, shared_user):
+    from app.runtime_backends.shared_hermes import SharedHermesBackend
+
+    class FakeBinding:
+        openclaw_agent_id = "usr_sharedagent"
+
+    class FakeSharedContext:
+        binding = FakeBinding()
+        session_prefix = "agent:usr_sharedagent:"
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def fake_context(self, db, user):
+        assert user is shared_user
+        return FakeSharedContext()
+
+    async def fake_create_run(self, *, message, session_id, session_key):
+        assert message == "Hi"
+        assert session_id == "agent:usr_sharedagent:sess-1"
+        assert session_key == "agent:usr_sharedagent:sess-1"
+        return {"run_id": "run-123", "session_id": session_id, "status": "started"}
+
+    recorded = []
+
+    async def fake_record_runtime_run(db, **kwargs):
+        recorded.append(kwargs)
+
+    times = iter([30.0, 30.1])
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.time.perf_counter", lambda: next(times))
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.SharedHermesBackend._context_for_user", fake_context)
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.HermesClient.create_run", fake_create_run)
+    monkeypatch.setattr(
+        "app.runtime_backends.shared_hermes.record_runtime_run",
+        fake_record_runtime_run,
+    )
+
+    caplog.set_level(logging.INFO, logger="app.runtime_backends.shared_hermes")
+
+    await SharedHermesBackend().send_message(
+        RuntimeContext(user=shared_user, scope="shared"),
+        session_key="agent:usr_sharedagent:sess-1",
+        message="Hi",
+    )
+
+    assert "hermes_run_started" in caplog.text
+    assert "scope=shared" in caplog.text
+    assert "user_id=shared-user-1234567890abcdef" in caplog.text
+    assert "run_id=run-123" in caplog.text
+    assert "elapsed_ms=100.0" in caplog.text
+    assert recorded == [
+        {
+            "run_id": "run-123",
+            "user_id": shared_user.id,
+            "session_key": "agent:usr_sharedagent:sess-1",
+            "runtime_mode": "shared",
+            "backend": "hermes",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shared_hermes_wait_run_rejects_unowned_run(monkeypatch, shared_user):
+    from app.runtime_backends.shared_hermes import SharedHermesBackend
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def fake_ensure_owned(db, *, run_id, user_id, runtime_mode, backend):
+        assert run_id == "run-other"
+        assert user_id == shared_user.id
+        assert runtime_mode == "shared"
+        assert backend == "hermes"
+        raise HTTPException(status_code=403, detail="Run does not belong to current user")
+
+    async def fake_collect(self, *args, **kwargs):
+        raise AssertionError("unowned run must not be sent to Hermes")
+
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr(
+        "app.runtime_backends.shared_hermes.ensure_runtime_run_owned",
+        fake_ensure_owned,
+    )
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.HermesClient.collect_run_events", fake_collect)
+
+    with pytest.raises(HTTPException) as exc:
+        await SharedHermesBackend().wait_run(
+            RuntimeContext(user=shared_user, scope="shared"),
+            "run-other",
+            9000,
+        )
+
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_shared_hermes_wait_run_logs_first_delta_and_total_latency(
+    monkeypatch,
+    caplog,
+    shared_user,
+):
+    from app.runtime_backends.shared_hermes import SharedHermesBackend
+
+    times = iter([40.0, 40.3, 41.0])
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.time.perf_counter", lambda: next(times))
+
+    async def fake_collect(self, run_id, timeout_ms=25000, on_event=None):
+        assert run_id == "run-123"
+        assert timeout_ms == 9000
+        assert on_event is not None
+        on_event({"type": "message.delta", "delta": "Hi"})
+        return [
+            {"type": "message.delta", "delta": "Hi"},
+            {"type": "run.completed", "output": "Hi"},
+        ]
+
+    async def fake_ensure_owned(db, *, run_id, user_id, runtime_mode, backend):
+        assert run_id == "run-123"
+        assert user_id == shared_user.id
+        assert runtime_mode == "shared"
+        assert backend == "hermes"
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr(
+        "app.runtime_backends.shared_hermes.ensure_runtime_run_owned",
+        fake_ensure_owned,
+    )
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.HermesClient.collect_run_events", fake_collect)
+
+    caplog.set_level(logging.INFO, logger="app.runtime_backends.shared_hermes")
+
+    await SharedHermesBackend().wait_run(RuntimeContext(user=shared_user, scope="shared"), "run-123", 9000)
+
+    assert "hermes_run_finished" in caplog.text
+    assert "scope=shared" in caplog.text
+    assert "user_id=shared-user-1234567890abcdef" in caplog.text
+    assert "run_id=run-123" in caplog.text
+    assert "first_delta_ms=300.0" in caplog.text
+    assert "elapsed_ms=1000.0" in caplog.text
+    assert "event_count=2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_shared_hermes_wait_run_logs_first_event_and_visible_delta_latency(
+    monkeypatch,
+    caplog,
+    shared_user,
+):
+    from app.runtime_backends.shared_hermes import SharedHermesBackend
+
+    times = iter([30.0, 30.05, 30.2, 30.8, 31.0])
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.time.perf_counter", lambda: next(times))
+
+    async def fake_collect(self, run_id, timeout_ms=25000, on_event=None):
+        assert run_id == "run-123"
+        assert timeout_ms == 9000
+        assert on_event is not None
+        on_event({"type": "run.started"})
+        on_event({"type": "message.delta", "delta": "<think>private"})
+        on_event({"type": "message.delta", "delta": " reasoning</think>\n\nVisible"})
+        return [
+            {"type": "run.started"},
+            {"type": "message.delta", "delta": "<think>private"},
+            {"type": "message.delta", "delta": " reasoning</think>\n\nVisible"},
+            {"type": "run.completed", "output": "<think>private reasoning</think>\n\nVisible"},
+        ]
+
+    async def fake_ensure_owned(db, *, run_id, user_id, runtime_mode, backend):
+        assert run_id == "run-123"
+        assert user_id == shared_user.id
+        assert runtime_mode == "shared"
+        assert backend == "hermes"
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr(
+        "app.runtime_backends.shared_hermes.ensure_runtime_run_owned",
+        fake_ensure_owned,
+    )
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.HermesClient.collect_run_events", fake_collect)
+
+    caplog.set_level(logging.INFO, logger="app.runtime_backends.shared_hermes")
+
+    await SharedHermesBackend().wait_run(RuntimeContext(user=shared_user, scope="shared"), "run-123", 9000)
+
+    assert "first_event_ms=50.0" in caplog.text
+    assert "first_delta_ms=200.0" in caplog.text
+    assert "first_visible_delta_ms=800.0" in caplog.text
+    assert "elapsed_ms=1000.0" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -555,8 +1096,9 @@ async def test_hermes_client_collect_run_events_parses_sse(monkeypatch):
 
     monkeypatch.setattr("app.hermes_client.httpx.AsyncClient", fake_client)
 
+    seen_events = []
     client = HermesClient(base_url="http://hermes.local")
-    events = await client.collect_run_events("run-1", timeout_ms=5000)
+    events = await client.collect_run_events("run-1", timeout_ms=5000, on_event=seen_events.append)
 
     assert events == [
         {"type": "run.started"},
@@ -565,6 +1107,7 @@ async def test_hermes_client_collect_run_events_parses_sse(monkeypatch):
     assert captured[0][0] == "STREAM GET"
     assert captured[0][1] == "http://hermes.local/v1/runs/run-1/events"
     assert captured[0][2]["params"] == {"timeout_ms": 5000}
+    assert seen_events == events
 
 
 @pytest.mark.asyncio
@@ -1141,6 +1684,12 @@ async def test_shared_hermes_stream_run_events_sends_bridge_key(monkeypatch, sha
         assert user is shared_user
         return object()
 
+    async def fake_ensure_owned(db, *, run_id, user_id, runtime_mode, backend):
+        assert run_id == "run-123"
+        assert user_id == shared_user.id
+        assert runtime_mode == "shared"
+        assert backend == "hermes"
+
     class FakeAsyncSessionContext:
         async def __aenter__(self):
             return object()
@@ -1158,6 +1707,10 @@ async def test_shared_hermes_stream_run_events_sends_bridge_key(monkeypatch, sha
     monkeypatch.setattr("app.runtime_backends.shared_hermes.get_user_by_id", fake_get_user)
     monkeypatch.setattr("app.runtime_backends.shared_hermes.async_session", lambda: FakeAsyncSessionContext())
     monkeypatch.setattr("app.runtime_backends.shared_hermes.SharedHermesBackend._context_for_user", fake_context)
+    monkeypatch.setattr(
+        "app.runtime_backends.shared_hermes.ensure_runtime_run_owned",
+        fake_ensure_owned,
+    )
     monkeypatch.setattr("app.runtime_backends.shared_hermes.httpx.AsyncClient", lambda timeout=None: FakeAsyncClientForStream())
 
     response = await SharedHermesBackend().stream_run_events(
@@ -1177,6 +1730,68 @@ async def test_shared_hermes_stream_run_events_sends_bridge_key(monkeypatch, sha
         {"headers": {"Authorization": "Bearer shared-key"}},
     )
     assert body == b'data: {"event":"run.completed"}\n\n'
+
+
+@pytest.mark.asyncio
+async def test_shared_hermes_stream_run_events_rejects_unowned_run(monkeypatch, shared_user):
+    from app.runtime_backends.shared_hermes import SharedHermesBackend
+
+    class FakeRequest:
+        async def is_disconnected(self):
+            return False
+
+    class FakeAsyncClientForStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, method, url, **kwargs):
+            raise AssertionError("unowned run must not be sent to Hermes")
+
+    async def fake_get_user(db, user_id):
+        assert user_id == shared_user.id
+        return shared_user
+
+    async def fake_context(self, db, user):
+        assert user is shared_user
+        return object()
+
+    async def fake_ensure_owned(db, *, run_id, user_id, runtime_mode, backend):
+        assert run_id == "run-other"
+        assert user_id == shared_user.id
+        assert runtime_mode == "shared"
+        assert backend == "hermes"
+        raise HTTPException(status_code=403, detail="Run does not belong to current user")
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.settings.shared_hermes_url", "http://shared-hermes")
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.decode_token", lambda token: {"type": "access", "sub": shared_user.id})
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.get_user_by_id", fake_get_user)
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.SharedHermesBackend._context_for_user", fake_context)
+    monkeypatch.setattr(
+        "app.runtime_backends.shared_hermes.ensure_runtime_run_owned",
+        fake_ensure_owned,
+    )
+    monkeypatch.setattr("app.runtime_backends.shared_hermes.httpx.AsyncClient", lambda timeout=None: FakeAsyncClientForStream())
+
+    with pytest.raises(HTTPException) as exc:
+        await SharedHermesBackend().stream_run_events(
+            RuntimeContext(user=shared_user, scope="shared"),
+            FakeRequest(),
+            "tok",
+            "run-other",
+        )
+
+    assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -1289,3 +1904,154 @@ async def test_proxy_file_request_rejects_unsupported_dedicated_hermes_download(
         await proxy._proxy_file_request(FakeRequest(), "tok", "filemanager/download")
 
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_proxy_http_returns_empty_commands_for_dedicated_hermes(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    class FakeRequest:
+        method = "GET"
+        query_params = {"agentId": "agent-main"}
+        headers = {}
+
+        async def body(self):
+            return b""
+
+    async def fake_container_url(db, user):
+        pytest.fail("Hermes commands compatibility must not proxy to missing /api/commands")
+
+    monkeypatch.setattr("app.routes.proxy._container_url", fake_container_url)
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+
+    response = await proxy.proxy_http("commands", FakeRequest(), dedicated_user, object())
+
+    assert response.status_code == 200
+    assert response.body == (
+        b'{"agentId":"agent-main","commands":[],"runtime":"hermes",'
+        b'"compatibility":"openclaw-empty"}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_proxy_http_maps_models_to_hermes_v1_models(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    captured = []
+
+    class FakeRequest:
+        method = "GET"
+        query_params = {}
+        headers = {}
+
+        async def body(self):
+            return b""
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        content = b'{"data":[{"id":"hermes-agent","object":"model"}]}'
+
+        def json(self):
+            return {"data": [{"id": "hermes-agent", "object": "model"}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def request(self, method, url, **kwargs):
+            captured.append((method, url, kwargs))
+            return FakeResponse()
+
+    async def fake_container_url(db, user):
+        return "http://dedicated-hermes"
+
+    monkeypatch.setattr("app.routes.proxy._container_url", fake_container_url)
+    monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+    monkeypatch.setattr(proxy.settings, "default_model", "dashscope/qwen3-coder-plus")
+
+    response = await proxy.proxy_http("models", FakeRequest(), dedicated_user, object())
+
+    assert response.status_code == 200
+    assert captured[0][0] == "GET"
+    assert captured[0][1] == "http://dedicated-hermes/v1/models"
+    assert b'"models":[{"id":"hermes-agent","name":"hermes-agent","provider":"hermes"}]' in response.body
+    assert b'"configuredModel":"dashscope/qwen3-coder-plus"' in response.body
+
+
+@pytest.mark.asyncio
+async def test_proxy_http_maps_openclaw_cron_jobs_to_hermes_jobs(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    captured = []
+
+    class FakeRequest:
+        method = "GET"
+        query_params = {"include_disabled": "true"}
+        headers = {}
+
+        async def body(self):
+            return b""
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        content = b'{"jobs":[]}'
+
+        def json(self):
+            return {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "name": "daily brief",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+                        "schedule_display": "0 9 * * *",
+                        "prompt": "summarize",
+                        "deliver": "local",
+                        "next_run_at": "2026-05-07T09:00:00+08:00",
+                        "last_run_at": None,
+                        "last_status": None,
+                        "last_error": None,
+                        "created_at": "2026-05-06T09:00:00+08:00",
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def request(self, method, url, **kwargs):
+            captured.append((method, url, kwargs))
+            return FakeResponse()
+
+    async def fake_container_url(db, user):
+        return "http://dedicated-hermes"
+
+    monkeypatch.setattr("app.routes.proxy._container_url", fake_container_url)
+    monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+
+    response = await proxy.proxy_http("cron/jobs", FakeRequest(), dedicated_user, object())
+
+    assert response.status_code == 200
+    assert captured[0][0] == "GET"
+    assert captured[0][1] == "http://dedicated-hermes/api/jobs?include_disabled=true"
+    assert b'"id":"job-1"' in response.body
+    assert b'"schedule_kind":"cron"' in response.body
+    assert b'"schedule_expr":"0 9 * * *"' in response.body
+    assert b'"message":"summarize"' in response.body

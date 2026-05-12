@@ -127,6 +127,8 @@ def _runtime_environment(container_token: str, sso_token: str | None) -> dict[st
                 "GATEWAY_ALLOW_ALL_USERS": "true",
                 "OPENAI_API_KEY": settings.dedicated_hermes_default_api_key,
                 "HERMES_API_TOOLSETS": settings.hermes_api_toolsets,
+                "HERMES_REASONING_EFFORT": settings.hermes_reasoning_effort,
+                "HERMES_SERVICE_TIER": settings.hermes_service_tier,
             }
         )
     if sso_token:
@@ -183,6 +185,10 @@ def _build_hermes_config_yaml() -> str:
         "platform_toolsets": {
             "api_server": _hermes_api_toolsets(),
         },
+        "agent": {
+            "reasoning_effort": settings.hermes_reasoning_effort,
+            "service_tier": settings.hermes_service_tier,
+        },
     }
     return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
 
@@ -201,11 +207,112 @@ def _build_hermes_env_file() -> str:
         f"API_SERVER_KEY={settings.dedicated_hermes_api_key}",
         "GATEWAY_ALLOW_ALL_USERS=true",
         f"HERMES_API_TOOLSETS={settings.hermes_api_toolsets}",
+        f"HERMES_REASONING_EFFORT={settings.hermes_reasoning_effort}",
+        f"HERMES_SERVICE_TIER={settings.hermes_service_tier}",
     ]
     default_api_key = (settings.dedicated_hermes_default_api_key or "").strip()
     if default_api_key:
         lines.append(f"OPENAI_API_KEY={default_api_key}")
     return "\n".join(lines) + "\n"
+
+
+def _platform_proxy_model_ref(model: str) -> str:
+    model = (model or "").strip()
+    if not model:
+        return ""
+    if model.startswith("platform-proxy/"):
+        return model
+    return f"platform-proxy/{model}"
+
+
+def _apply_openclaw_model_config(config: dict, default_model: str) -> bool:
+    target_model = _platform_proxy_model_ref(default_model)
+    if not target_model:
+        return False
+
+    agents = config.setdefault("agents", {})
+    defaults = agents.setdefault("defaults", {})
+    changed = False
+    if defaults.get("model") != target_model:
+        defaults["model"] = target_model
+        changed = True
+
+    agent_list = agents.get("list")
+    if not isinstance(agent_list, list):
+        agent_list = []
+        agents["list"] = agent_list
+
+    main_agent = None
+    for agent in agent_list:
+        if isinstance(agent, dict) and str(agent.get("id") or "").lower() == "main":
+            main_agent = agent
+            break
+
+    if main_agent is None:
+        agent_list.insert(0, {"id": "main", "default": True, "model": target_model})
+        changed = True
+    elif main_agent.get("model") != target_model:
+        main_agent["model"] = target_model
+        changed = True
+
+    return changed
+
+
+def _write_openclaw_model_config(container: docker.models.containers.Container) -> None:
+    target_model = _platform_proxy_model_ref(settings.default_model)
+    if not target_model:
+        return
+    script = r"""
+import json
+import sys
+import time
+from pathlib import Path
+
+target_model = sys.argv[1]
+config_path = Path("/root/.openclaw/openclaw.json")
+last_text = None
+stable_reads = 0
+for _ in range(40):
+    if config_path.exists():
+        try:
+            current_text = config_path.read_text(encoding="utf-8")
+        except OSError:
+            current_text = None
+        if current_text is not None:
+            if current_text == last_text:
+                stable_reads += 1
+            else:
+                last_text = current_text
+                stable_reads = 1
+            if stable_reads >= 4:
+                break
+    time.sleep(0.5)
+
+if config_path.exists():
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+else:
+    config = {}
+
+agents = config.setdefault("agents", {})
+defaults = agents.setdefault("defaults", {})
+defaults["model"] = target_model
+agent_list = agents.setdefault("list", [])
+main_agent = None
+for agent in agent_list:
+    if isinstance(agent, dict) and str(agent.get("id") or "").lower() == "main":
+        main_agent = agent
+        break
+if main_agent is None:
+    agent_list.insert(0, {"id": "main", "default": True, "model": target_model})
+else:
+    main_agent["model"] = target_model
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+"""
+    result = container.exec_run(["python3", "-c", script, target_model])
+    if result.exit_code != 0:
+        output = result.output.decode("utf-8", errors="replace") if result.output else ""
+        raise RuntimeError(f"failed to patch OpenClaw model config: {output}")
 
 
 def _write_runtime_metadata(container: docker.models.containers.Container, markdown: str) -> None:
@@ -505,6 +612,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     docker_container.reload()
     browser_binding, service_binding = _published_port_bindings(docker_container)
     if runtime_backend == "openclaw":
+        _write_openclaw_model_config(docker_container)
         expose_markdown = _build_expose_port_skill_markdown(
             user_id=user_id,
             container_name=container_name,

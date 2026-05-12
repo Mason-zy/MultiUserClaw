@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from fastapi import HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -29,6 +31,16 @@ class DedicatedOpenClawBackend(RuntimeBackend):
                 resp = await client.request(method=method, url=f"{base_url}{path}", **kwargs)
             except httpx.ConnectError as exc:
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OpenClaw container is starting up") from exc
+            except httpx.TimeoutException as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="Dedicated OpenClaw request timed out",
+                ) from exc
+            except httpx.RequestError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Dedicated OpenClaw runtime is unavailable",
+                ) from exc
 
         try:
             payload = resp.json()
@@ -39,6 +51,25 @@ class DedicatedOpenClawBackend(RuntimeBackend):
             detail = payload.get("detail") if isinstance(payload, dict) else payload
             raise HTTPException(status_code=resp.status_code, detail=detail or "Dedicated OpenClaw request failed")
         return payload
+
+    async def prewarm(self, ctx: RuntimeContext) -> dict:
+        await self._base_url(ctx)
+        attempts = max(1, settings.hermes_connect_retries)
+        delay_seconds = max(0.0, settings.hermes_retry_delay_seconds)
+        last_exc: HTTPException | None = None
+        for attempt in range(attempts):
+            try:
+                await self._request(ctx, "GET", "/api/agents", timeout=2.0)
+                return {"ok": True, "status": "ready", "runtime": "openclaw"}
+            except HTTPException as exc:
+                last_exc = exc
+                if exc.status_code < 500 or attempt == attempts - 1:
+                    raise
+                if delay_seconds:
+                    await asyncio.sleep(delay_seconds)
+        if last_exc is not None:
+            raise last_exc
+        return {"ok": True, "status": "ready", "runtime": "openclaw"}
 
     async def get_agent_info(self, ctx: RuntimeContext) -> dict:
         payload = await self._request(ctx, "GET", "/api/agents")

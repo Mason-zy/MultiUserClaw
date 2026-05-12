@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -24,6 +25,19 @@ class HermesClient:
         self.api_key = api_key.strip()
         self.connect_retries = max(0, connect_retries)
         self.retry_delay_seconds = max(0.0, retry_delay_seconds)
+        self._client: httpx.AsyncClient | None = None
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None or getattr(self._client, "is_closed", False):
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is None or getattr(self._client, "is_closed", False):
+            self._client = None
+            return
+        await self._client.aclose()
+        self._client = None
 
     def _auth_headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -38,18 +52,23 @@ class HermesClient:
         if headers:
             kwargs["headers"] = headers
         for attempt in range(self.connect_retries + 1):
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                try:
-                    response = await client.request(method, f"{self.base_url}{path}", **kwargs)
-                    break
-                except httpx.ConnectError as exc:
-                    if attempt < self.connect_retries:
-                        await asyncio.sleep(self.retry_delay_seconds)
-                        continue
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail="Hermes runtime is unavailable",
-                    ) from exc
+            client = self._ensure_client()
+            try:
+                response = await client.request(
+                    method,
+                    f"{self.base_url}{path}",
+                    timeout=timeout,
+                    **kwargs,
+                )
+                break
+            except httpx.ConnectError as exc:
+                if attempt < self.connect_retries:
+                    await asyncio.sleep(self.retry_delay_seconds)
+                    continue
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Hermes runtime is unavailable",
+                ) from exc
         else:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -70,16 +89,27 @@ class HermesClient:
         payload = await self.request("GET", "/v1/models")
         return payload if isinstance(payload, dict) else {"data": []}
 
-    async def create_run(self, *, message: str, session_id: str | None = None, model: str = "hermes-agent") -> dict:
+    async def create_run(
+        self,
+        *,
+        message: str,
+        session_id: str | None = None,
+        session_key: str | None = None,
+        model: str = "hermes-agent",
+    ) -> dict:
         body: dict[str, Any] = {
             "model": model,
             "input": message,
         }
         if session_id:
             body["session_id"] = session_id
+        headers = {}
+        if session_key:
+            headers["X-Hermes-Session-Key"] = session_key
         payload = await self.request(
             "POST",
             "/v1/runs",
+            headers=headers,
             json=body,
             timeout=300.0,
         )
@@ -109,34 +139,42 @@ class HermesClient:
             return payload
         return {"choices": []}
 
-    async def collect_run_events(self, run_id: str, timeout_ms: int = 25000) -> list[dict]:
+    async def collect_run_events(
+        self,
+        run_id: str,
+        timeout_ms: int = 25000,
+        on_event: Callable[[dict], None] | None = None,
+    ) -> list[dict]:
         events: list[dict] = []
-        async with httpx.AsyncClient(timeout=None) as client:
-            try:
-                async with client.stream(
-                    "GET",
-                    f"{self.base_url}/v1/runs/{run_id}/events",
-                    params={"timeout_ms": timeout_ms},
-                    headers=self._auth_headers(),
-                ) as response:
-                    if response.status_code >= 400:
-                        raise HTTPException(
-                            status_code=response.status_code,
-                            detail="Hermes run event stream request failed",
-                        )
-                    buffer = ""
-                    async for chunk in response.aiter_bytes():
-                        buffer += chunk.decode("utf-8", errors="ignore")
-                        while "\n\n" in buffer:
-                            raw_event, buffer = buffer.split("\n\n", 1)
-                            parsed = self._parse_sse_event(raw_event)
-                            if parsed is not None:
-                                events.append(parsed)
-            except httpx.ConnectError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Hermes runtime is unavailable",
-                ) from exc
+        client = self._ensure_client()
+        try:
+            async with client.stream(
+                "GET",
+                f"{self.base_url}/v1/runs/{run_id}/events",
+                params={"timeout_ms": timeout_ms},
+                headers=self._auth_headers(),
+                timeout=None,
+            ) as response:
+                if response.status_code >= 400:
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail="Hermes run event stream request failed",
+                    )
+                buffer = ""
+                async for chunk in response.aiter_bytes():
+                    buffer += chunk.decode("utf-8", errors="ignore")
+                    while "\n\n" in buffer:
+                        raw_event, buffer = buffer.split("\n\n", 1)
+                        parsed = self._parse_sse_event(raw_event)
+                        if parsed is not None:
+                            events.append(parsed)
+                            if on_event is not None:
+                                on_event(parsed)
+        except httpx.ConnectError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hermes runtime is unavailable",
+            ) from exc
         return events
 
     def _parse_sse_event(self, raw_event: str) -> dict | None:

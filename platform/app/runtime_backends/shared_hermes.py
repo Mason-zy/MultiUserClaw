@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 
 import httpx
 from fastapi import HTTPException, Request, UploadFile, status
@@ -12,6 +14,7 @@ from app.config import settings
 from app.db.engine import async_session
 from app.db.models import User
 from app.hermes_client import HermesClient
+from app.runtime.run_ownership import ensure_runtime_run_owned, record_runtime_run
 from app.runtime_backend import RuntimeBackend, RuntimeContext
 from app.runtime_backends.hermes_files import (
     SHARED_HERMES_CONTAINER_NAME,
@@ -19,6 +22,8 @@ from app.runtime_backends.hermes_files import (
 )
 from app.runtime_backends.hermes_run import (
     HermesEventSanitizer,
+    HermesRunTimingTracker,
+    format_latency_ms,
     sanitize_hermes_message,
     sanitize_hermes_messages,
     sanitize_run_events,
@@ -32,8 +37,22 @@ from app.shared_runtime import (
     ensure_shared_agent_binding,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 1)
+
 
 class SharedHermesBackend(RuntimeBackend):
+    def __init__(self):
+        self._clients: dict[tuple[str, str, float, int, float], HermesClient] = {}
+
+    async def aclose(self) -> None:
+        for client in self._clients.values():
+            await client.aclose()
+        self._clients.clear()
+
     async def _context_for_user(self, db: AsyncSession, user: User):
         return await ensure_shared_agent_binding(db, user, provision_openclaw_agent=False)
 
@@ -47,13 +66,25 @@ class SharedHermesBackend(RuntimeBackend):
         return base_url
 
     def _client(self) -> HermesClient:
-        return HermesClient(
-            base_url=self._base_url(),
-            api_key=settings.shared_hermes_api_key,
-            timeout=settings.shared_openclaw_timeout_seconds,
-            connect_retries=settings.hermes_connect_retries,
-            retry_delay_seconds=settings.hermes_retry_delay_seconds,
+        base_url = self._base_url()
+        key = (
+            base_url,
+            settings.shared_hermes_api_key,
+            settings.shared_openclaw_timeout_seconds,
+            settings.hermes_connect_retries,
+            settings.hermes_retry_delay_seconds,
         )
+        client = self._clients.get(key)
+        if client is None:
+            client = HermesClient(
+                base_url=base_url,
+                api_key=settings.shared_hermes_api_key,
+                timeout=settings.shared_openclaw_timeout_seconds,
+                connect_retries=settings.hermes_connect_retries,
+                retry_delay_seconds=settings.hermes_retry_delay_seconds,
+            )
+            self._clients[key] = client
+        return client
 
     async def _request(self, method: str, path: str, **kwargs):
         return await self._client().request(method, path, **kwargs)
@@ -62,6 +93,12 @@ class SharedHermesBackend(RuntimeBackend):
         if not settings.shared_hermes_api_key:
             return {}
         return {"Authorization": f"Bearer {settings.shared_hermes_api_key}"}
+
+    async def prewarm(self, ctx: RuntimeContext) -> dict:
+        async with async_session() as db:
+            await self._context_for_user(db, ctx.user)
+        await self._client().get_models()
+        return {"ok": True, "status": "ready", "runtime": "hermes"}
 
     def _session_summary(self, payload: dict) -> dict:
         message_count = payload.get("message_count")
@@ -129,23 +166,71 @@ class SharedHermesBackend(RuntimeBackend):
         }
 
     async def send_message(self, ctx: RuntimeContext, session_key: str, message: str) -> dict:
+        started_at = time.perf_counter()
         async with async_session() as db:
             shared_ctx = await self._context_for_user(db, ctx.user)
         key = ensure_session_owned(shared_ctx, session_key) if session_key else build_session_key(shared_ctx.binding.openclaw_agent_id)
-        payload = await self._client().create_run(message=message, session_id=key)
+        payload = await self._client().create_run(message=message, session_id=key, session_key=key)
+        run_id = payload.get("run_id", "") if isinstance(payload, dict) else ""
+        effective_session_key = payload.get("session_id", key) if isinstance(payload, dict) else key
+        if run_id:
+            async with async_session() as db:
+                await record_runtime_run(
+                    db,
+                    run_id=run_id,
+                    user_id=ctx.user.id,
+                    session_key=effective_session_key,
+                    runtime_mode="shared",
+                    backend="hermes",
+                )
+        logger.info(
+            "hermes_run_started scope=%s user_id=%s session_key=%s run_id=%s elapsed_ms=%.1f",
+            ctx.scope,
+            ctx.user.id,
+            effective_session_key,
+            run_id,
+            _elapsed_ms(started_at),
+        )
         return {
             "ok": True,
-            "run_id": payload.get("run_id", "") if isinstance(payload, dict) else "",
-            "runId": payload.get("run_id", "") if isinstance(payload, dict) else "",
-            "session_key": payload.get("session_id", key) if isinstance(payload, dict) else key,
-            "sessionKey": payload.get("session_id", key) if isinstance(payload, dict) else key,
+            "run_id": run_id,
+            "runId": run_id,
+            "session_key": effective_session_key,
+            "sessionKey": effective_session_key,
             "raw": payload if isinstance(payload, dict) else {},
         }
 
     async def wait_run(self, ctx: RuntimeContext, run_id: str, timeout_ms: int):
-        events = await self._client().collect_run_events(run_id, timeout_ms=timeout_ms)
+        started_at = time.perf_counter()
+        timing = HermesRunTimingTracker(lambda: _elapsed_ms(started_at))
+
+        async with async_session() as db:
+            await ensure_runtime_run_owned(
+                db,
+                run_id=run_id,
+                user_id=ctx.user.id,
+                runtime_mode="shared",
+                backend="hermes",
+            )
+        events = await self._client().collect_run_events(
+            run_id,
+            timeout_ms=timeout_ms,
+            on_event=timing.record,
+        )
         events = sanitize_run_events(events)
         status_text, final_message = summarize_run_events(events)
+        logger.info(
+            "hermes_run_finished scope=%s user_id=%s run_id=%s status=%s first_event_ms=%s first_delta_ms=%s first_visible_delta_ms=%s elapsed_ms=%.1f event_count=%d",
+            ctx.scope,
+            ctx.user.id,
+            run_id,
+            status_text,
+            format_latency_ms(timing.first_event_ms),
+            format_latency_ms(timing.first_delta_ms),
+            format_latency_ms(timing.first_visible_delta_ms),
+            _elapsed_ms(started_at),
+            len(events),
+        )
         return {
             "run_id": run_id,
             "status": status_text,
@@ -295,6 +380,13 @@ class SharedHermesBackend(RuntimeBackend):
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
             await self._context_for_user(db, user)
+            await ensure_runtime_run_owned(
+                db,
+                run_id=run_id,
+                user_id=user.id,
+                runtime_mode="shared",
+                backend="hermes",
+            )
 
         target_url = f"{self._base_url()}/v1/runs/{run_id}/events"
 

@@ -1,306 +1,387 @@
 #!/usr/bin/env python3
 """
-OpenClaw 一键升级脚本
-从本地已 clone 的上游 OpenClaw 仓库同步文件到当前项目目录。
-会尊重 .gitignore 规则，保护自定义新增文件，删除操作逐个确认。
+Hermes Agent upgrade helper for Nanobot.
+
+The tool compares an already-cloned upstream hermes-agent checkout with the
+embedded ``hermes-agent/`` runtime directory. It is intentionally conservative:
+the default mode is a dry-run report, and Nanobot overlay files are reported as
+manual-merge items instead of being overwritten.
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatch
+from pathlib import Path
 
-# 我们新增的文件/目录，不应被上游覆盖或删除
-CUSTOM_FILES = {
-    "bridge",
-    "bridge-entrypoint.sh",
-    "bridge-package.json",
-    "bridge-deploy-copy",
+TARGET_DIR_NAME = "hermes-agent"
+ROUTE_FILE = "gateway/platforms/api_server.py"
+
+# Nanobot-owned overlay files. These either adapt Hermes to the platform
+# contract or carry local seed data, so an upstream sync must not overwrite them.
+PROTECTED_PATHS = {
+    "AGENTS.md",
     "Dockerfile.bridge",
-    "tsconfig.bridge.json",
-    "upgrade_openclaw.py",
-    "requirements.txt"
+    "docker/entrypoint.sh",
+    "gateway/platforms/nanobot_api_compat.py",
+    "nanobot_hermes.py",
 }
+PROTECTED_PREFIXES = (
+    "deploy_copy/",
+)
+
+SKIP_DIRS = {"node_modules", "dist", "dist-runtime", ".turbo", ".cache", ".pytest_cache"}
+ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "websocket"}
+
+
+@dataclass(frozen=True, order=True)
+class Route:
+    method: str
+    path: str
+
+
+@dataclass
+class RouteDiff:
+    local_routes: list[Route] = field(default_factory=list)
+    upstream_routes: list[Route] = field(default_factory=list)
+    local_only: list[Route] = field(default_factory=list)
+    upstream_only: list[Route] = field(default_factory=list)
+
+
+@dataclass
+class SyncPlan:
+    to_add: list[str] = field(default_factory=list)
+    to_update: list[str] = field(default_factory=list)
+    to_delete: list[str] = field(default_factory=list)
+    protected_add: list[str] = field(default_factory=list)
+    protected_update: list[str] = field(default_factory=list)
+    protected_delete: list[str] = field(default_factory=list)
+    route_diff: RouteDiff = field(default_factory=RouteDiff)
+
+    @property
+    def has_file_changes(self) -> bool:
+        return bool(self.to_add or self.to_update or self.to_delete)
 
 
 def load_gitignore_patterns(project_dir: Path) -> list[str]:
-    """从 .gitignore 读取忽略规则"""
     gitignore = project_dir / ".gitignore"
+    if not gitignore.exists():
+        return []
+
     patterns = []
-    if gitignore.exists():
-        for line in gitignore.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
+    for line in gitignore.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
             patterns.append(line)
     return patterns
 
 
 def is_ignored(rel_path: str, patterns: list[str]) -> bool:
-    """检查路径是否匹配 .gitignore 规则"""
     parts = rel_path.split("/")
     for pattern in patterns:
         clean = pattern.rstrip("/")
-        # 带 ** 的模式
         if "**" in clean:
-            simple = clean.replace("**/", "").replace("/**", "")
-            for part in parts:
-                if fnmatch(part, simple):
-                    return True
             if fnmatch(rel_path, clean):
+                return True
+            simple = clean.replace("**/", "").replace("/**", "")
+            if any(fnmatch(part, simple) for part in parts):
                 return True
             continue
-        # 检查目录名或文件名匹配
+
         if clean.startswith("/"):
-            # 根目录相对匹配
             if fnmatch(rel_path, clean.lstrip("/")):
                 return True
-        else:
-            # 任意层级匹配
-            for part in parts:
-                if fnmatch(part, clean):
-                    return True
-            if fnmatch(rel_path, clean):
-                return True
+            continue
+
+        if fnmatch(rel_path, clean) or any(fnmatch(part, clean) for part in parts):
+            return True
     return False
 
 
-def is_custom(rel_path: str) -> bool:
-    """检查是否为我们自定义新增的文件/目录"""
-    top = rel_path.split("/")[0]
-    return top in CUSTOM_FILES or rel_path in CUSTOM_FILES
+def is_protected(rel_path: str) -> bool:
+    return rel_path in PROTECTED_PATHS or any(rel_path.startswith(p) for p in PROTECTED_PREFIXES)
 
-# 构建产物目录，遍历时直接跳过（避免 Windows 长路径报错）
-SKIP_DIRS = {"node_modules", "dist", "dist-runtime", ".turbo", ".cache"}
 
-def collect_files(root: Path, gitignore_patterns: list[str]) -> dict[str, Path]:
-    """收集目录下所有文件（排除 .gitignore 匹配项、.git 和构建产物目录）"""
-    files = {}
+def collect_files(root: Path, gitignore_patterns: list[str] | None = None) -> dict[str, Path]:
+    patterns = gitignore_patterns or []
+    files: dict[str, Path] = {}
     for dirpath, dirnames, filenames in os.walk(root):
-        # 跳过 .git 和构建产物目录（原地修改 dirnames 阻止递归进入）
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and d != ".git"]
-        for fname in filenames:
-            full = Path(dirpath) / fname
-            rel = str(full.relative_to(root)).replace("\\", "/")
-            if is_ignored(rel, gitignore_patterns):
+        dirnames[:] = [d for d in dirnames if d != ".git" and d not in SKIP_DIRS]
+        for filename in filenames:
+            full_path = Path(dirpath) / filename
+            rel_path = str(full_path.relative_to(root)).replace("\\", "/")
+            if is_ignored(rel_path, patterns):
                 continue
-            files[rel] = full
+            files[rel_path] = full_path
     return files
 
+
+def files_are_identical(left: Path, right: Path) -> bool:
+    try:
+        return left.read_bytes() == right.read_bytes()
+    except OSError:
+        return False
+
+
+def _literal_after_open_paren(line: str) -> str | None:
+    start = line.find("(")
+    if start < 0:
+        return None
+    tail = line[start + 1 :].lstrip()
+    if not tail or tail[0] not in {"'", '"'}:
+        return None
+
+    quote = tail[0]
+    end = tail.find(quote, 1)
+    if end < 0:
+        return None
+    return tail[1:end]
+
+
+def extract_routes(api_server_path: Path) -> list[Route]:
+    if not api_server_path.exists():
+        return []
+
+    routes = set()
+    for raw_line in api_server_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+
+        marker = ".router.add_"
+        if marker in line:
+            method_tail = line.split(marker, 1)[1]
+            method = method_tail.split("(", 1)[0].lower()
+            path = _literal_after_open_paren(line)
+            if method in ROUTE_METHODS and path:
+                routes.add(Route(method.upper(), path))
+            continue
+
+        if line.startswith("@") and ".route" not in line:
+            before_paren = line.split("(", 1)[0]
+            method = before_paren.rsplit(".", 1)[-1].lower()
+            path = _literal_after_open_paren(line)
+            if method in ROUTE_METHODS and path:
+                routes.add(Route(method.upper(), path))
+
+    return sorted(routes)
+
+
+def analyze_route_diff(local_api_server: Path, upstream_api_server: Path) -> RouteDiff:
+    local_routes = extract_routes(local_api_server)
+    upstream_routes = extract_routes(upstream_api_server)
+    local_set = set(local_routes)
+    upstream_set = set(upstream_routes)
+    return RouteDiff(
+        local_routes=local_routes,
+        upstream_routes=upstream_routes,
+        local_only=sorted(local_set - upstream_set),
+        upstream_only=sorted(upstream_set - local_set),
+    )
+
+
+def validate_upstream_hermes(upstream_dir: Path) -> None:
+    if not upstream_dir.exists():
+        raise ValueError(f"上游目录不存在: {upstream_dir}")
+    if not (upstream_dir / ROUTE_FILE).exists():
+        raise ValueError(f"{upstream_dir} 缺少 {ROUTE_FILE}，不像 hermes-agent 仓库")
+
+    marker_files = [upstream_dir / "pyproject.toml", upstream_dir / "package.json"]
+    if not any(path.exists() and "hermes" in path.read_text(encoding="utf-8").lower() for path in marker_files):
+        raise ValueError(f"{upstream_dir} 缺少 Hermes 项目标识")
+
+
 def check_git_clean(project_dir: Path) -> bool:
-    """检查工作目录是否有未提交的更改"""
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=project_dir,
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
+            check=False,
         )
-        return result.stdout.strip() == ""
-    except Exception:
-        return True  # 如果不是 git 仓库，跳过检查
+    except OSError:
+        return True
+    return result.stdout.strip() == ""
 
-def files_are_identical(file1: Path, file2: Path) -> bool:
-    """比较两个文件内容是否相同"""
-    try:
-        return file1.read_bytes() == file2.read_bytes()
-    except Exception:
-        return False
 
-def confirm(prompt: str) -> bool:
-    """请求用户确认"""
-    return True
-    while True:
-        answer = input(f"{prompt} [y/n]: ").strip().lower()
-        if answer in ("y", "yes"):
-            return True
-        if answer in ("n", "no"):
-            return False
+def analyze_sync(
+    upstream_dir: Path,
+    target_dir: Path,
+    *,
+    use_gitignore: bool = False,
+) -> SyncPlan:
+    validate_upstream_hermes(upstream_dir)
+    if not target_dir.exists():
+        raise ValueError(f"本地 Hermes 目录不存在: {target_dir}")
 
-def main():
-    parser = argparse.ArgumentParser(description="升级 OpenClaw 到最新版本")
-    parser.add_argument(
-        "upstream_path",
-        help="本地已 clone 的上游 OpenClaw 仓库路径，例如 /Users/admin/git/openclaw"
+    gitignore_patterns = load_gitignore_patterns(target_dir) if use_gitignore else []
+    upstream_files = collect_files(upstream_dir, gitignore_patterns)
+    local_files = collect_files(target_dir, gitignore_patterns)
+
+    plan = SyncPlan(
+        route_diff=analyze_route_diff(target_dir / ROUTE_FILE, upstream_dir / ROUTE_FILE)
     )
+
+    for rel_path, upstream_path in sorted(upstream_files.items()):
+        if rel_path not in local_files:
+            target = plan.protected_add if is_protected(rel_path) else plan.to_add
+            target.append(rel_path)
+        elif not files_are_identical(upstream_path, local_files[rel_path]):
+            target = plan.protected_update if is_protected(rel_path) else plan.to_update
+            target.append(rel_path)
+
+    for rel_path in sorted(local_files):
+        if rel_path not in upstream_files:
+            target = plan.protected_delete if is_protected(rel_path) else plan.to_delete
+            target.append(rel_path)
+
+    return plan
+
+
+def apply_sync(plan: SyncPlan, upstream_dir: Path, target_dir: Path, *, delete_missing: bool) -> dict[str, int]:
+    counts = {"added": 0, "updated": 0, "deleted": 0}
+
+    for rel_path in plan.to_add:
+        src = upstream_dir / rel_path
+        dst = target_dir / rel_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        counts["added"] += 1
+
+    for rel_path in plan.to_update:
+        src = upstream_dir / rel_path
+        dst = target_dir / rel_path
+        shutil.copy2(src, dst)
+        counts["updated"] += 1
+
+    if delete_missing:
+        for rel_path in plan.to_delete:
+            dst = target_dir / rel_path
+            dst.unlink()
+            counts["deleted"] += 1
+            parent = dst.parent
+            while parent != target_dir and parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+
+    return counts
+
+
+def _route_label(route: Route) -> str:
+    return f"{route.method} {route.path}"
+
+
+def _print_section(title: str, items: list[str], marker: str) -> None:
+    print(f"{title}: {len(items)}")
+    for item in items:
+        print(f"  {marker} {item}")
+    print()
+
+
+def print_plan(plan: SyncPlan, upstream_dir: Path, target_dir: Path) -> None:
+    print("=" * 72)
+    print("Hermes Agent 升级分析")
+    print("=" * 72)
+    print(f"上游仓库: {upstream_dir}")
+    print(f"本地目录: {target_dir}")
+    print()
+
+    _print_section("新增文件", plan.to_add, "+")
+    _print_section("更新文件", plan.to_update, "~")
+    _print_section("本地多余文件", plan.to_delete, "-")
+
+    if plan.protected_add or plan.protected_update or plan.protected_delete:
+        print("受保护文件（不自动写入，需手工合并）:")
+        for item in plan.protected_add:
+            print(f"  + {item}")
+        for item in plan.protected_update:
+            print(f"  ~ {item}")
+        for item in plan.protected_delete:
+            print(f"  - {item}")
+        print()
+
+    route_diff = plan.route_diff
+    print("Hermes API route 差异:")
+    print(f"  本地 routes: {len(route_diff.local_routes)}")
+    print(f"  上游 routes: {len(route_diff.upstream_routes)}")
+    print(f"  上游新增 routes: {len(route_diff.upstream_only)}")
+    for route in route_diff.upstream_only:
+        print(f"    + {_route_label(route)}")
+    print(f"  本地 overlay routes: {len(route_diff.local_only)}")
+    for route in route_diff.local_only:
+        print(f"    - {_route_label(route)}")
+    print()
+
+    if ROUTE_FILE in plan.protected_update:
+        print(f"注意: {ROUTE_FILE} 已受保护。请手工合并上游 route，同时保留 Nanobot session/events overlay。")
+        print()
+
+
+def _plan_to_json(plan: SyncPlan) -> str:
+    return json.dumps(asdict(plan), ensure_ascii=False, indent=2)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="分析并同步上游 Hermes Agent 到本地 hermes-agent/")
+    parser.add_argument("upstream_path", help="本地已 clone/pull 的上游 hermes-agent 仓库路径")
     parser.add_argument(
-        "--dry-run",
+        "--target",
+        default=str(Path(__file__).resolve().parent / TARGET_DIR_NAME),
+        help="本地 Hermes 目标目录，默认 ./hermes-agent",
+    )
+    parser.add_argument("--apply", action="store_true", help="执行非保护文件的新增/更新")
+    parser.add_argument(
+        "--delete-missing",
         action="store_true",
-        help="仅预览变更，不执行实际操作"
+        help="配合 --apply 删除上游已不存在的非保护文件；默认仅报告",
     )
     parser.add_argument(
         "--use-gitignore",
         action="store_true",
-        help="使用 .gitignore 规则过滤文件（默认不使用，会同步所有文件）"
+        help="使用目标目录 .gitignore 过滤文件；默认同步仓库文件清单",
     )
-    args = parser.parse_args()
+    parser.add_argument("--json", action="store_true", help="输出机器可读 JSON 计划")
+    args = parser.parse_args(argv)
 
     upstream_dir = Path(args.upstream_path).resolve()
-    project_dir = Path(__file__).parent.resolve() / "openclaw"
+    target_dir = Path(args.target).resolve()
 
-    if not upstream_dir.exists():
-        print(f"错误: 上游目录不存在: {upstream_dir}")
-        sys.exit(1)
+    try:
+        plan = analyze_sync(upstream_dir, target_dir, use_gitignore=args.use_gitignore)
+    except ValueError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
 
-    if not (upstream_dir / "package.json").exists():
-        print(f"错误: {upstream_dir} 不像是一个有效的 OpenClaw 仓库")
-        sys.exit(1)
-
-    # ========== 打印说明 ==========
-    print("=" * 60)
-    print("  OpenClaw 升级工具")
-    print("=" * 60)
-    print()
-    print(f"  上游仓库: {upstream_dir}")
-    print(f"  本地项目: {project_dir}")
-    print()
-    print("  ⚠️  升级前请确保:")
-    print("    1. 已提交所有本地更改 (git add && git commit)")
-    print("    2. 已备份重要数据 (建议 git stash 或新建分支)")
-    print("    3. 上游仓库已 git pull 到最新版本")
-    print()
-    print("  以下自定义文件/目录将被保护，不会被修改或删除:")
-    for f in sorted(CUSTOM_FILES):
-        print(f"    - {f}")
-    print()
-
-    if not check_git_clean(project_dir):
-        print("  ⚠️  警告: 当前项目目录有未提交的更改!")
-        print("  建议先执行 git commit 再继续。")
-        print()
-
-    if not confirm("是否继续升级?"):
-        print("已取消。")
-        sys.exit(0)
-
-    # ========== 收集文件 ==========
-    print("\n正在分析文件差异...\n")
-
-    # 默认不使用 .gitignore，只有当 --use-gitignore 参数指定时才使用
-    if args.use_gitignore:
-        print("ℹ️  已启用 --use-gitignore，将使用 .gitignore 规则过滤文件\n")
-        gitignore_patterns = load_gitignore_patterns(project_dir)
+    if args.json:
+        print(_plan_to_json(plan))
     else:
-        print("ℹ️  默认模式：忽略 .gitignore 规则，将同步所有文件（包括 pnpm-lock.yaml 等）\n")
-        gitignore_patterns = []
+        print_plan(plan, upstream_dir, target_dir)
 
-    upstream_files = collect_files(upstream_dir, gitignore_patterns)
-    local_files = collect_files(project_dir, gitignore_patterns)
+    if not args.apply:
+        if not args.json:
+            print("dry-run: 未写入文件。确认计划后使用 --apply 执行非保护文件同步。")
+        return 0
 
-    # 分类变更
-    to_add = []      # 上游新增
-    to_update = []   # 上游修改
-    to_delete = []   # 上游已删除（本地多余）
+    if not check_git_clean(Path(__file__).resolve().parent):
+        print("错误: 当前仓库有未提交更改。请先提交或暂存，再执行 --apply。", file=sys.stderr)
+        return 3
 
-    for rel, upstream_path in sorted(upstream_files.items()):
-        if is_custom(rel):
-            continue
-        if rel not in local_files:
-            to_add.append(rel)
-        elif not files_are_identical(upstream_path, local_files[rel]):
-            to_update.append(rel)
+    counts = apply_sync(plan, upstream_dir, target_dir, delete_missing=args.delete_missing)
+    print(
+        "已同步: "
+        f"新增 {counts['added']}，更新 {counts['updated']}，删除 {counts['deleted']}。"
+    )
+    if plan.protected_add or plan.protected_update or plan.protected_delete:
+        print("仍有受保护文件未自动处理，请按上方清单手工合并。")
+    if plan.to_delete and not args.delete_missing:
+        print("上游缺失的非保护本地文件未删除；如确认需要删除，可重新运行 --apply --delete-missing。")
+    return 0
 
-    for rel in sorted(local_files.keys()):
-        if is_custom(rel):
-            continue
-        if rel not in upstream_files:
-            to_delete.append(rel)
-
-    # ========== 打印变更摘要 ==========
-    print(f"  新增文件: {len(to_add)}")
-    print(f"  更新文件: {len(to_update)}")
-    print(f"  待删除文件: {len(to_delete)}")
-    print()
-
-    if to_add:
-        print("--- 新增文件 ---")
-        for f in to_add:
-            print(f"  + {f}")
-        print()
-
-    if to_update:
-        print("--- 更新文件 ---")
-        for f in to_update:
-            print(f"  ~ {f}")
-        print()
-
-    if to_delete:
-        print("--- 待删除文件（需逐个确认）---")
-        for f in to_delete:
-            print(f"  - {f}")
-        print()
-
-    if not to_add and not to_update and not to_delete:
-        print("✅ 没有需要同步的变更，已是最新版本。")
-        sys.exit(0)
-
-    if args.dry_run:
-        print("(dry-run 模式，不执行实际操作)")
-        sys.exit(0)
-
-    if not confirm("是否开始同步?"):
-        print("已取消。")
-        sys.exit(0)
-
-    # ========== 执行同步 ==========
-    added = 0
-    updated = 0
-    deleted = 0
-    skipped_delete = 0
-
-    # 新增文件
-    for rel in to_add:
-        src = upstream_dir / rel
-        dst = project_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        print(f"  [新增] {rel}")
-        added += 1
-
-    # 更新文件
-    for rel in to_update:
-        src = upstream_dir / rel
-        dst = project_dir / rel
-        shutil.copy2(src, dst)
-        print(f"  [更新] {rel}")
-        updated += 1
-
-    # 删除文件（逐个确认）
-    for rel in to_delete:
-        print(f"\n  本地文件在上游已不存在: {rel}")
-        if confirm(f"  是否删除 {rel}?"):
-            dst = project_dir / rel
-            dst.unlink()
-            print(f"  [已删除] {rel}")
-            deleted += 1
-            # 清理空目录
-            parent = dst.parent
-            while parent != project_dir and not any(parent.iterdir()):
-                parent.rmdir()
-                parent = parent.parent
-        else:
-            print(f"  [跳过] {rel}")
-            skipped_delete += 1
-
-    # ========== 完成报告 ==========
-    print()
-    print("=" * 60)
-    print("  升级完成!")
-    print("=" * 60)
-    print(f"  新增: {added}")
-    print(f"  更新: {updated}")
-    print(f"  删除: {deleted}")
-    if skipped_delete:
-        print(f"  跳过删除: {skipped_delete}")
-    print()
-    print("  建议后续操作:")
-    print("    1. git diff 查看变更详情")
-    print("    2. pnpm install 更新依赖")
-    print("    3. 测试功能是否正常")
-    print("    4. git add && git commit 提交升级")
-    print()
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from typing import Any
-
 
 _THINK_OPEN_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
@@ -73,6 +73,48 @@ class HermesEventSanitizer:
             return sanitized
 
         return sanitized
+
+
+class HermesRunTimingTracker:
+    def __init__(self, elapsed_ms: Callable[[], float]):
+        self._elapsed_ms = elapsed_ms
+        self._sanitizer = HermesEventSanitizer()
+        self.first_event_ms: float | None = None
+        self.first_delta_ms: float | None = None
+        self.first_visible_delta_ms: float | None = None
+
+    def record(self, event: dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            return
+
+        elapsed_ms: float | None = None
+
+        def _event_elapsed_ms() -> float:
+            nonlocal elapsed_ms
+            if elapsed_ms is None:
+                elapsed_ms = self._elapsed_ms()
+            return elapsed_ms
+
+        if self.first_event_ms is None:
+            self.first_event_ms = _event_elapsed_ms()
+
+        event_type = event.get("type") or event.get("event")
+        if event_type != "message.delta":
+            return
+
+        delta = event.get("delta")
+        if not isinstance(delta, str) or not delta:
+            return
+
+        if self.first_delta_ms is None:
+            self.first_delta_ms = _event_elapsed_ms()
+
+        if self.first_visible_delta_ms is None and self._sanitizer.filter_delta(delta):
+            self.first_visible_delta_ms = _event_elapsed_ms()
+
+
+def format_latency_ms(value: float | None) -> str:
+    return "none" if value is None else f"{value:.1f}"
 
 
 def strip_thinking_blocks(text: str) -> str:

@@ -4,7 +4,6 @@ from app.config import Settings, settings
 from app.db.models import User
 from app.runtime_backend import RuntimeBackend
 
-
 _dedicated_backends: dict[str, RuntimeBackend] = {}
 _shared_backends: dict[str, RuntimeBackend] = {}
 
@@ -45,3 +44,18 @@ def get_runtime_backend(user: User, runtime_settings: Settings | None = None) ->
     if user.runtime_mode == "shared":
         return _load_backend("shared", runtime_settings.shared_runtime_backend)
     return _load_backend("dedicated", runtime_settings.dedicated_runtime_backend)
+
+
+async def close_runtime_backends() -> None:
+    backends = [*_dedicated_backends.values(), *_shared_backends.values()]
+    seen: set[int] = set()
+    for backend in backends:
+        backend_id = id(backend)
+        if backend_id in seen:
+            continue
+        seen.add(backend_id)
+        close = getattr(backend, "aclose", None)
+        if close is not None:
+            await close()
+    _dedicated_backends.clear()
+    _shared_backends.clear()

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""
     minimax_api_key: str = ""
     minimax_api_base: str = "https://api.minimax.io/v1"
+    minimax_m27_use_highspeed: bool = True
     aihubmix_api_key: str = ""
     moonshot_api_key: str = ""
     kimi_api_key: str = ""
@@ -42,7 +43,9 @@ class Settings(BaseSettings):
     shared_runtime_backend: str = "hermes"
     hermes_connect_retries: int = 60
     hermes_retry_delay_seconds: float = 0.5
-    hermes_api_toolsets: str = "none"
+    hermes_api_toolsets: str = "terminal,file,skills"
+    hermes_reasoning_effort: str = "none"
+    hermes_service_tier: str = ""
 
     # Dedicated runtime endpoints/images
     openclaw_image: str = "openclaw:latest"
@@ -94,7 +97,7 @@ class Settings(BaseSettings):
     port: int = 8080
 
     # Public-facing base URL (used to generate external access URLs in port mapping)
-    public_base_url: str = "http://www.exmaple.com"
+    public_base_url: str = "http://openclaw.infox-med.com"
 
     # Local dev: set to e.g. "http://127.0.0.1:18080" to skip Docker containers
     dev_openclaw_url: str = ""

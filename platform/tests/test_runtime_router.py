@@ -28,6 +28,14 @@ class DummyBackend:
     pass
 
 
+class CloseableBackend:
+    def __init__(self):
+        self.close_count = 0
+
+    async def aclose(self):
+        self.close_count += 1
+
+
 class DedicatedHermesMarker:
     pass
 
@@ -178,3 +186,20 @@ def test_unknown_shared_backend_raises_clear_error():
         assert "mystery" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_backends_closes_cached_backends_once():
+    import app.runtime_router as runtime_router
+
+    backend = CloseableBackend()
+    runtime_router._dedicated_backends.clear()
+    runtime_router._shared_backends.clear()
+    runtime_router._dedicated_backends["hermes"] = backend
+    runtime_router._shared_backends["hermes"] = backend
+
+    await runtime_router.close_runtime_backends()
+
+    assert backend.close_count == 1
+    assert runtime_router._dedicated_backends == {}
+    assert runtime_router._shared_backends == {}

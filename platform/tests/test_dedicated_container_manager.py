@@ -29,11 +29,16 @@ def test_settings_expose_dedicated_container_prefix_fields():
 
     assert settings.dedicated_runtime_container_name_prefix == "hermes-user"
     assert settings.dedicated_runtime_data_volume_prefix == "hermes-data"
+    assert settings.hermes_api_toolsets == "terminal,file,skills"
 
 
 def test_openclaw_runtime_uses_legacy_defaults(monkeypatch):
     monkeypatch.setattr(manager.settings, "dedicated_runtime_backend", "openclaw")
-    monkeypatch.setattr(manager.settings, "dedicated_runtime_container_name_prefix", "openclaw-user")
+    monkeypatch.setattr(
+        manager.settings,
+        "dedicated_runtime_container_name_prefix",
+        "openclaw-user",
+    )
     monkeypatch.setattr(manager.settings, "dedicated_runtime_data_volume_prefix", "openclaw-data")
     monkeypatch.setattr(manager.settings, "user_container_bind_ip", "0.0.0.0")
 
@@ -47,6 +52,25 @@ def test_openclaw_runtime_uses_legacy_defaults(monkeypatch):
         "5900/tcp": ("0.0.0.0", 5901),
         "30000/tcp": ("0.0.0.0", 30001),
     }
+
+
+def test_openclaw_model_config_patch_aligns_main_agent_with_platform_default():
+    config = {
+        "agents": {
+            "defaults": {"model": "platform-proxy/old/default"},
+            "list": [
+                {"id": "main", "model": "platform-proxy/dashscope/MiniMax/MiniMax-M2.7"},
+                {"id": "doctor", "model": "platform-proxy/kimi/kimi-k2.5"},
+            ],
+        }
+    }
+
+    changed = manager._apply_openclaw_model_config(config, "deepseek/deepseek-chat")
+
+    assert changed is True
+    assert config["agents"]["defaults"]["model"] == "platform-proxy/deepseek/deepseek-chat"
+    assert config["agents"]["list"][0]["model"] == "platform-proxy/deepseek/deepseek-chat"
+    assert config["agents"]["list"][1]["model"] == "platform-proxy/kimi/kimi-k2.5"
 
 
 def test_hermes_runtime_switches_internal_port_publish(monkeypatch):
@@ -90,10 +114,16 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
 def test_build_hermes_runtime_files_support_platform_default_model(monkeypatch):
     monkeypatch.setattr(manager.settings, "default_model", "claude-sonnet-4-5")
     monkeypatch.setattr(manager.settings, "dedicated_hermes_default_provider", "custom")
-    monkeypatch.setattr(manager.settings, "dedicated_hermes_default_base_url", "http://gateway:8080/llm/v1")
+    monkeypatch.setattr(
+        manager.settings,
+        "dedicated_hermes_default_base_url",
+        "http://gateway:8080/llm/v1",
+    )
     monkeypatch.setattr(manager.settings, "dedicated_hermes_api_key", "bridge-key")
     monkeypatch.setattr(manager.settings, "dedicated_hermes_default_api_key", "proxy-key")
     monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "none")
+    monkeypatch.setattr(manager.settings, "hermes_reasoning_effort", "none")
+    monkeypatch.setattr(manager.settings, "hermes_service_tier", "")
 
     config_yaml = manager._build_hermes_config_yaml()
     env_file = manager._build_hermes_env_file()
@@ -101,12 +131,17 @@ def test_build_hermes_runtime_files_support_platform_default_model(monkeypatch):
     assert 'default: claude-sonnet-4-5' in config_yaml
     assert 'provider: custom' in config_yaml
     assert 'base_url: http://gateway:8080/llm/v1' in config_yaml
+    assert 'agent:' in config_yaml
+    assert 'reasoning_effort: none' in config_yaml
+    assert "service_tier: ''" in config_yaml
     assert 'platform_toolsets:' in config_yaml
     assert 'api_server: []' in config_yaml
     assert 'API_SERVER_KEY=bridge-key' in env_file
     assert 'GATEWAY_ALLOW_ALL_USERS=true' in env_file
     assert 'OPENAI_API_KEY=proxy-key' in env_file
     assert 'HERMES_API_TOOLSETS=none' in env_file
+    assert 'HERMES_REASONING_EFFORT=none' in env_file
+    assert 'HERMES_SERVICE_TIER=' in env_file
 
 
 def test_hermes_api_toolsets_support_skills_and_full_modes(monkeypatch):
