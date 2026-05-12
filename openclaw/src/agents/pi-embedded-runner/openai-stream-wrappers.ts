@@ -15,6 +15,7 @@ import {
   resolveOpenAIResponsesPayloadPolicy,
 } from "../openai-responses-payload-policy.js";
 import { resolveOpenAITextVerbosity, type OpenAITextVerbosity } from "../openai-text-verbosity.js";
+import { createOpenAIResponsesTransportStreamFn } from "../openai-transport-stream.js";
 import { resolveProviderRequestPolicyConfig } from "../provider-request-config.js";
 import { log } from "./logger.js";
 import { mapThinkingLevelToReasoningEffort } from "./reasoning-effort-utils.js";
@@ -22,6 +23,19 @@ import { streamWithPayloadPatch } from "./stream-payload-utils.js";
 
 type OpenAIServiceTier = "auto" | "default" | "flex" | "priority";
 export { resolveOpenAITextVerbosity };
+
+function resolveOpenAITextVerbosityForModel(
+  model: { api?: unknown; id?: unknown; provider?: unknown },
+  verbosity: OpenAITextVerbosity,
+): OpenAITextVerbosity {
+  const api = normalizeOptionalLowercaseString(model.api);
+  const provider = normalizeOptionalLowercaseString(model.provider);
+  const id = normalizeOptionalLowercaseString(model.id);
+  if (api === "openai-responses" && provider === "openai" && id === "chat-latest") {
+    return "medium";
+  }
+  return verbosity;
+}
 
 function resolveOpenAIRequestCapabilities(model: {
   api?: unknown;
@@ -391,7 +405,9 @@ export function createOpenAITextVerbosityWrapper(
     if (model.api !== "openai-responses" && model.api !== "openai-codex-responses") {
       return underlying(model, context, options);
     }
-    const shouldOverrideExistingVerbosity = model.api === "openai-codex-responses";
+    const resolvedVerbosity = resolveOpenAITextVerbosityForModel(model, verbosity);
+    const shouldOverrideExistingVerbosity =
+      model.api === "openai-codex-responses" || resolvedVerbosity !== verbosity;
     const originalOnPayload = options?.onPayload;
     return underlying(model, context, {
       ...options,
@@ -403,7 +419,7 @@ export function createOpenAITextVerbosityWrapper(
               ? (payloadObj.text as Record<string, unknown>)
               : {};
           if (shouldOverrideExistingVerbosity || existingText.verbosity === undefined) {
-            payloadObj.text = { ...existingText, verbosity };
+            payloadObj.text = { ...existingText, verbosity: resolvedVerbosity };
           }
         }
         return originalOnPayload?.(payload, model);
@@ -463,15 +479,6 @@ export function createCodexNativeWebSearchWrapper(
     });
   };
 }
-export function createCodexDefaultTransportWrapper(baseStreamFn: StreamFn | undefined): StreamFn {
-  const underlying = baseStreamFn ?? streamSimple;
-  return (model, context, options) =>
-    underlying(model, context, {
-      ...options,
-      transport: options?.transport ?? "auto",
-    });
-}
-
 export function createOpenAIDefaultTransportWrapper(baseStreamFn: StreamFn | undefined): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
   return (model, context, options) => {
@@ -489,6 +496,7 @@ export function createOpenAIDefaultTransportWrapper(baseStreamFn: StreamFn | und
 
 export function createOpenAIAttributionHeadersWrapper(
   baseStreamFn: StreamFn | undefined,
+  opts?: { codexNativeTransportStreamFn?: StreamFn },
 ): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
   return (model, context, options) => {
@@ -496,7 +504,13 @@ export function createOpenAIAttributionHeadersWrapper(
     if (!attributionProvider) {
       return underlying(model, context, options);
     }
-    return underlying(model, context, {
+    const shouldCreateCodexTransport =
+      attributionProvider === "openai-codex" &&
+      (baseStreamFn === undefined || baseStreamFn === streamSimple);
+    const streamFn = shouldCreateCodexTransport
+      ? (opts?.codexNativeTransportStreamFn ?? createOpenAIResponsesTransportStreamFn())
+      : underlying;
+    return streamFn(model, context, {
       ...options,
       headers: resolveProviderRequestPolicyConfig({
         provider: attributionProvider,

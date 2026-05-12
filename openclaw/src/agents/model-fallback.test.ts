@@ -1,14 +1,23 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { resetLogger, setLoggerOverride } from "../logging/logger.js";
 import { createWarnLogCapture } from "../logging/test-helpers/warn-log-capture.js";
+import {
+  clearCurrentPluginMetadataSnapshot,
+  setCurrentPluginMetadataSnapshot,
+} from "../plugins/current-plugin-metadata-snapshot.js";
+import { loadPluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import { AUTH_STORE_VERSION } from "./auth-profiles/constants.js";
 import type { AuthProfileStore } from "./auth-profiles/types.js";
 import { FailoverError } from "./failover-error.js";
 import { LiveSessionModelSwitchError } from "./live-model-switch-error.js";
-import { runWithImageModelFallback, runWithModelFallback } from "./model-fallback.js";
+import {
+  FallbackSummaryError,
+  runWithImageModelFallback,
+  runWithModelFallback,
+} from "./model-fallback.js";
 import { classifyEmbeddedPiRunResultForModelFallback } from "./pi-embedded-runner/result-fallback-classifier.js";
 import type { EmbeddedPiRunResult } from "./pi-embedded-runner/types.js";
 import { makeModelFallbackCfg } from "./test-helpers/model-fallback-config-fixture.js";
@@ -137,6 +146,17 @@ const OPENROUTER_MODEL_NOT_FOUND_PAYLOAD =
   '{"error":{"message":"Healer Alpha was a stealth model revealed on March 18th as an early testing version of MiMo-V2-Omni. Find it here: https://openrouter.ai/xiaomi/mimo-v2-omni","code":404},"user_id":"user_33GTyP8uDSYYbaeBO48AGHXyuMC"}';
 let authTempRoot = "";
 let authTempCounter = 0;
+
+beforeAll(() => {
+  setCurrentPluginMetadataSnapshot(loadPluginMetadataSnapshot({ config: {}, env: process.env }), {
+    config: {},
+    env: process.env,
+  });
+});
+
+afterAll(() => {
+  clearCurrentPluginMetadataSnapshot();
+});
 
 afterEach(() => {
   authRuntimeMock.clear();
@@ -472,6 +492,51 @@ describe("runWithModelFallback", () => {
         }),
       ]),
     });
+  });
+
+  it("carries request attribution through exhausted fallback summaries", async () => {
+    const cfg = makeCfg({
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai/gpt-5.4",
+            fallbacks: ["anthropic/claude-opus-4-6"],
+          },
+        },
+      },
+    });
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("rate limit exceeded"), { status: 429 }))
+      .mockRejectedValueOnce(Object.assign(new Error("overloaded"), { status: 503 }));
+
+    try {
+      await runWithModelFallback({
+        cfg,
+        provider: "openai",
+        model: "gpt-5.4",
+        runId: "run-42713",
+        sessionId: "session:browser-42713",
+        lane: "answer",
+        run,
+      });
+      throw new Error("expected fallback summary");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FallbackSummaryError);
+      if (!(err instanceof FallbackSummaryError)) {
+        throw err;
+      }
+      expect(err).toMatchObject({
+        name: "FallbackSummaryError",
+        sessionId: "session:browser-42713",
+        lane: "answer",
+      });
+      expect(err.cause).toMatchObject({
+        name: "FailoverError",
+        sessionId: "session:browser-42713",
+        lane: "answer",
+      });
+    }
   });
 
   it("uses optional result classification to continue to configured fallbacks", async () => {

@@ -43,6 +43,7 @@ function runXaiToolPayloadWrapper(params: {
   api?: XaiStreamApi;
   modelId?: string;
   input?: string[];
+  reasoning?: boolean;
 }) {
   const baseStreamFn: StreamFn = (_model, _context, options) => {
     options?.onPayload?.(params.payload, {} as Model<XaiStreamApi>);
@@ -58,6 +59,7 @@ function runXaiToolPayloadWrapper(params: {
       id:
         params.modelId ??
         (api === "openai-completions" ? "grok-4-1-fast-reasoning" : "grok-4-fast"),
+      reasoning: params.reasoning ?? false,
       ...(params.input ? { input: params.input } : {}),
     } as Model<XaiStreamApi>,
     { messages: [] } as Context,
@@ -137,6 +139,28 @@ describe("xai stream wrappers", () => {
     expect(payload).not.toHaveProperty("reasoning");
     expect(payload).not.toHaveProperty("reasoningEffort");
     expect(payload).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("disables transport-level reasoning metadata for xai models", () => {
+    let capturedReasoning: unknown = true;
+    const baseStreamFn: StreamFn = (model) => {
+      capturedReasoning = model.reasoning;
+      return {} as ReturnType<StreamFn>;
+    };
+
+    const wrapped = createXaiToolPayloadCompatibilityWrapper(baseStreamFn);
+    void wrapped(
+      {
+        api: "openai-responses",
+        provider: "xai",
+        id: "grok-4.3",
+        reasoning: true,
+      } as Model<XaiStreamApi>,
+      { messages: [] } as Context,
+      {},
+    );
+
+    expect(capturedReasoning).toBe(false);
   });
 
   it("moves image-bearing tool results out of function_call_output payloads", () => {

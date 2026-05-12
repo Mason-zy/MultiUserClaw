@@ -6,6 +6,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "../../shared/string-coerce.js";
+import { theme } from "../../terminal/theme.js";
 import type { GatewayRpcOpts } from "../gateway-rpc.js";
 import { addGatewayClientOptions, callGatewayFromCli } from "../gateway-rpc.js";
 import { parsePositiveIntOrUndefined } from "../program/helpers.js";
@@ -13,6 +14,7 @@ import { resolveCronCreateSchedule } from "./schedule-options.js";
 import {
   getCronChannelOptions,
   coerceCronDeliveryPreviews,
+  enrichCronJsonWithStatus,
   handleCronCliError,
   parseCronToolsAllow,
   printCronJson,
@@ -51,7 +53,7 @@ export function registerCronListCommand(cron: Command) {
             includeDisabled: Boolean(opts.all),
           });
           if (opts.json) {
-            printCronJson(res);
+            printCronJson(enrichCronJsonWithStatus(res));
             return;
           }
           const jobs = (res as { jobs?: CronJob[] } | null)?.jobs ?? [];
@@ -230,6 +232,15 @@ export function registerCronAddCommand(cron: Command) {
           const description = normalizeOptionalString(opts.description);
 
           const sessionKey = normalizeOptionalString(opts.sessionKey);
+
+          if (payload.kind === "agentTurn" && !agentId) {
+            defaultRuntime.error(
+              theme.warn(
+                "No --agent specified; the job will run with the configured default agent. " +
+                  "Specify --agent to choose a specific agent.",
+              ),
+            );
+          }
 
           const params = {
             name,

@@ -8,9 +8,14 @@ import type { TelegramDirectConfig, TelegramGroupConfig } from "openclaw/plugin-
 import { deriveLastRoutePolicy } from "openclaw/plugin-sdk/routing";
 import { normalizeAccountId, resolveThreadSessionKeys } from "openclaw/plugin-sdk/routing";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
-import { resolveDefaultTelegramAccountId } from "./accounts.js";
+import { mergeTelegramAccountConfig, resolveDefaultTelegramAccountId } from "./accounts.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
-import { firstDefined, normalizeAllowFrom, normalizeDmAllowFromWithStore } from "./bot-access.js";
+import {
+  expandTelegramAllowFromWithAccessGroups,
+  firstDefined,
+  normalizeAllowFrom,
+  normalizeDmAllowFromWithStore,
+} from "./bot-access.js";
 import { resolveTelegramInboundBody } from "./bot-message-context.body.js";
 import {
   buildTelegramInboundContextPayload,
@@ -22,6 +27,7 @@ import {
   extractTelegramForumFlag,
   resolveTelegramForumFlag,
   resolveTelegramThreadSpec,
+  shouldUseTelegramDmThreadSession,
 } from "./bot/helpers.js";
 import type { TelegramGetChat } from "./bot/types.js";
 import {
@@ -73,6 +79,7 @@ type TelegramStatusReactionController = {
 
 export type TelegramMessageContext = {
   ctxPayload: TelegramMessageContextPayload["ctxPayload"];
+  turn: TelegramMessageContextPayload["turn"];
   primaryCtx: BuildTelegramMessageContextParams["primaryCtx"];
   msg: BuildTelegramMessageContextParams["primaryCtx"]["message"];
   chatId: BuildTelegramMessageContextParams["primaryCtx"]["message"]["chat"]["id"];
@@ -223,6 +230,7 @@ export const buildTelegramMessageContext = async ({
   const freshCfg =
     loadFreshConfig?.() ??
     (runtime?.getRuntimeConfig ?? (await loadTelegramMessageContextRuntime()).getRuntimeConfig)();
+  const telegramCfg = mergeTelegramAccountConfig(freshCfg, account.accountId);
   let { route, configuredBinding, configuredBindingSessionKey } = resolveTelegramConversationRoute({
     cfg: freshCfg,
     accountId: account.accountId,
@@ -255,13 +263,25 @@ export const buildTelegramMessageContext = async ({
   const groupAllowOverride = firstDefined(topicConfig?.allowFrom, groupConfig?.allowFrom);
   // For DMs, prefer per-DM/topic allowFrom (groupAllowOverride) over account-level allowFrom
   const dmAllowFrom = groupAllowOverride ?? allowFrom;
-  const effectiveDmAllow = normalizeDmAllowFromWithStore({
+  const expandedDmAllowFrom = await expandTelegramAllowFromWithAccessGroups({
+    cfg: freshCfg,
     allowFrom: dmAllowFrom,
+    accountId: account.accountId,
+    senderId,
+  });
+  const effectiveDmAllow = normalizeDmAllowFromWithStore({
+    allowFrom: expandedDmAllowFrom,
     storeAllowFrom,
     dmPolicy: effectiveDmPolicy,
   });
   // Group sender checks are explicit and must not inherit DM pairing-store entries.
-  const effectiveGroupAllow = normalizeAllowFrom(groupAllowOverride ?? groupAllowFrom);
+  const expandedGroupAllowFrom = await expandTelegramAllowFromWithAccessGroups({
+    cfg: freshCfg,
+    allowFrom: groupAllowOverride ?? groupAllowFrom,
+    accountId: account.accountId,
+    senderId,
+  });
+  const effectiveGroupAllow = normalizeAllowFrom(expandedGroupAllowFrom);
   const hasGroupAllowOverride = groupAllowOverride !== undefined;
   const senderUsername = msg.from?.username ?? "";
   const baseAccess = evaluateTelegramGroupBaseAccess({
@@ -380,9 +400,14 @@ export const buildTelegramMessageContext = async ({
     isGroup,
     senderId,
   });
-  // DMs: use thread suffix for session isolation (works regardless of dmScope)
+  const useDmThreadSession = shouldUseTelegramDmThreadSession({
+    dmThreadId,
+    accountConfig: telegramCfg,
+    directConfig,
+    topicConfig,
+  });
   const threadKeys =
-    dmThreadId != null
+    useDmThreadSession && dmThreadId != null
       ? resolveThreadSessionKeys({ baseSessionKey, threadId: `${chatId}:${dmThreadId}` })
       : null;
   const sessionKey = threadKeys?.sessionKey ?? baseSessionKey;
@@ -403,8 +428,8 @@ export const buildTelegramMessageContext = async ({
   });
   const baseRequireMention = resolveGroupRequireMention(chatId);
   const requireMention = firstDefined(
-    activationOverride,
     topicConfig?.requireMention,
+    activationOverride,
     telegramGroupConfig?.requireMention,
     baseRequireMention,
   );
@@ -429,6 +454,7 @@ export const buildTelegramMessageContext = async ({
     senderId,
     senderUsername,
     resolvedThreadId,
+    replyThreadId,
     routeAgentId: route.agentId,
     sessionKey,
     effectiveGroupAllow,
@@ -554,7 +580,7 @@ export const buildTelegramMessageContext = async ({
         )
       : null;
 
-  const { ctxPayload, skillFilter } = await buildTelegramInboundContextPayload({
+  const { ctxPayload, skillFilter, turn } = await buildTelegramInboundContextPayload({
     cfg,
     primaryCtx,
     msg,
@@ -592,6 +618,7 @@ export const buildTelegramMessageContext = async ({
 
   return {
     ctxPayload,
+    turn,
     primaryCtx,
     msg,
     chatId,

@@ -30,6 +30,13 @@ describe("normalizeDiscordOutboundTarget", () => {
     expect(normalizeDiscordOutboundTarget("channel:123")).toEqual({ ok: true, to: "channel:123" });
   });
 
+  it("normalizes provider-prefixed channel targets", () => {
+    expect(normalizeDiscordOutboundTarget("discord:channel:123")).toEqual({
+      ok: true,
+      to: "channel:123",
+    });
+  });
+
   it("passes through user: prefixed targets", () => {
     expect(normalizeDiscordOutboundTarget("user:123")).toEqual({ ok: true, to: "user:123" });
   });
@@ -48,6 +55,13 @@ describe("normalizeDiscordOutboundTarget", () => {
 
   it("trims whitespace", () => {
     expect(normalizeDiscordOutboundTarget("  123  ")).toEqual({ ok: true, to: "channel:123" });
+  });
+
+  it("normalizes bare IDs in allowFrom to user: targets", () => {
+    expect(normalizeDiscordOutboundTarget("1470130713209602050", ["1470130713209602050"])).toEqual({
+      ok: true,
+      to: "user:1470130713209602050",
+    });
   });
 });
 
@@ -79,6 +93,18 @@ describe("discordOutbound", () => {
         payload: { text: "<previous_response>null</previous_response>visible" },
       }),
     ).toBe("visible");
+  });
+
+  it("uses allowFrom to disambiguate bare numeric DM delivery targets", () => {
+    expect(
+      discordOutbound.resolveTarget?.({
+        to: "1470130713209602050",
+        allowFrom: ["1470130713209602050"],
+      }),
+    ).toEqual({
+      ok: true,
+      to: "user:1470130713209602050",
+    });
   });
 
   it("preserves Discord-native angle markup while stripping internal scaffolding", () => {

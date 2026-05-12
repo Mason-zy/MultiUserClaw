@@ -160,6 +160,32 @@ describe("openai responses payload policy", () => {
     expect(payload).not.toHaveProperty("reasoning");
   });
 
+  it("strips explicit reasoning payloads for xAI responses routes", () => {
+    const payload = {
+      reasoning: {
+        effort: "high",
+        summary: "auto",
+      },
+    } satisfies Record<string, unknown>;
+
+    applyOpenAIResponsesPayloadPolicy(
+      payload,
+      resolveOpenAIResponsesPayloadPolicy(
+        {
+          api: "openai-responses",
+          provider: "xai",
+          id: "grok-4.3",
+          baseUrl: "https://api.x.ai/v1",
+        },
+        { storeMode: "disable" },
+      ),
+    );
+
+    expect(payload).toEqual({
+      store: false,
+    });
+  });
+
   it("emits store false for native OpenAI Codex responses disable mode", () => {
     expect(
       resolveOpenAIResponsesPayloadPolicy(
