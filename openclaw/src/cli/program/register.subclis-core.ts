@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { resolveCliArgvInvocation } from "../argv-invocation.js";
+import { resolveCliCommandPathPolicy } from "../command-path-policy.js";
 import {
   shouldEagerRegisterSubcommands,
   shouldRegisterPrimarySubcommandOnly,
@@ -9,6 +10,8 @@ import {
   defineImportedProgramCommandGroupSpecs,
   type CommandGroupDescriptorSpec,
 } from "./command-group-descriptors.js";
+import { removeCommandByName } from "./command-tree.js";
+import { loadPrivateQaCliModule } from "./private-qa-cli.js";
 import {
   registerCommandGroupByName,
   registerCommandGroups,
@@ -24,17 +27,44 @@ export { getSubCliCommandsWithSubcommands };
 
 type SubCliRegistrar = (program: Command) => Promise<void> | void;
 
+function shouldRegisterGatewayRunOnly(name: string, argv: string[]): boolean {
+  if (name !== "gateway") {
+    return false;
+  }
+  const invocation = resolveCliArgvInvocation(argv);
+  if (invocation.hasHelpOrVersion || invocation.commandPath[0] !== "gateway") {
+    return false;
+  }
+  return invocation.commandPath.length === 1 || invocation.commandPath[1] === "run";
+}
+
+async function registerGatewayRunOnly(program: Command): Promise<void> {
+  const { addGatewayRunCommand } = await import("../gateway-cli/run.js");
+  removeCommandByName(program, "gateway");
+  const gateway = addGatewayRunCommand(
+    program.command("gateway").description("Run, inspect, and query the WebSocket Gateway"),
+  );
+  addGatewayRunCommand(
+    gateway.command("run").description("Run the WebSocket Gateway (foreground)"),
+  );
+}
+
 async function registerSubCliWithPluginCommands(
   program: Command,
   registerSubCli: () => Promise<void>,
   pluginCliPosition: "before" | "after",
 ) {
+  const invocation = resolveCliArgvInvocation(process.argv);
+  const shouldRegisterPluginCommands =
+    !invocation.hasHelpOrVersion &&
+    (invocation.commandPath.length <= 1 ||
+      resolveCliCommandPathPolicy(invocation.commandPath).loadPlugins !== "never");
   const { registerPluginCliCommandsFromValidatedConfig } = await import("../../plugins/cli.js");
-  if (pluginCliPosition === "before") {
+  if (pluginCliPosition === "before" && shouldRegisterPluginCommands) {
     await registerPluginCliCommandsFromValidatedConfig(program);
   }
   await registerSubCli();
-  if (pluginCliPosition === "after") {
+  if (pluginCliPosition === "after" && shouldRegisterPluginCommands) {
     await registerPluginCliCommandsFromValidatedConfig(program);
   }
 }
@@ -110,7 +140,7 @@ const entrySpecs: readonly CommandGroupDescriptorSpec<SubCliRegistrar>[] = [
       exportName: "registerSandboxCli",
     },
     {
-      commandNames: ["tui"],
+      commandNames: ["tui", "terminal", "chat"],
       loadModule: () => import("../tui-cli.js"),
       exportName: "registerTuiCli",
     },
@@ -131,8 +161,13 @@ const entrySpecs: readonly CommandGroupDescriptorSpec<SubCliRegistrar>[] = [
     },
     {
       commandNames: ["qa"],
-      loadModule: () => import("../qa-cli.js"),
-      exportName: "registerQaCli",
+      loadModule: loadPrivateQaCliModule,
+      exportName: "registerQaLabCli",
+    },
+    {
+      commandNames: ["proxy"],
+      loadModule: () => import("../proxy-cli.js"),
+      exportName: "registerProxyCli",
     },
     {
       commandNames: ["hooks"],
@@ -216,14 +251,28 @@ const entrySpecs: readonly CommandGroupDescriptorSpec<SubCliRegistrar>[] = [
 ];
 
 function resolveSubCliCommandGroups(): CommandGroupEntry[] {
-  return buildCommandGroupEntries(getSubCliEntryDescriptors(), entrySpecs, (register) => register);
+  const descriptors = getSubCliEntryDescriptors();
+  const descriptorNames = new Set(descriptors.map((descriptor) => descriptor.name));
+  return buildCommandGroupEntries(
+    descriptors,
+    entrySpecs.filter((spec) => spec.commandNames.every((name) => descriptorNames.has(name))),
+    (register) => register,
+  );
 }
 
 export function getSubCliEntries(): ReadonlyArray<SubCliDescriptor> {
   return getSubCliEntryDescriptors();
 }
 
-export async function registerSubCliByName(program: Command, name: string): Promise<boolean> {
+export async function registerSubCliByName(
+  program: Command,
+  name: string,
+  argv: string[] = process.argv,
+): Promise<boolean> {
+  if (shouldRegisterGatewayRunOnly(name, argv)) {
+    await registerGatewayRunOnly(program);
+    return true;
+  }
   return registerCommandGroupByName(program, resolveSubCliCommandGroups(), name);
 }
 

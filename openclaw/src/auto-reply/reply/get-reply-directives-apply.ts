@@ -1,11 +1,12 @@
-import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry, SessionScope } from "../../config/sessions/types.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import type { MsgContext } from "../templating.js";
 import type { ElevatedLevel } from "../thinking.js";
 import type { ReplyPayload } from "../types.js";
 import type { CommandContext } from "./commands-types.js";
 import { isDirectiveOnly } from "./directive-handling.directive-only.js";
+import { resolveModelSelectionFromDirective } from "./directive-handling.model-selection.js";
 import type { ApplyInlineDirectivesFastLaneParams } from "./directive-handling.params.js";
 import type { InlineDirectives } from "./directive-handling.parse.js";
 import { clearInlineDirectives } from "./get-reply-directives-utils.js";
@@ -47,6 +48,31 @@ function loadDirectiveFastLane() {
 function loadDirectivePersist() {
   directivePersistPromise ??= import("./directive-handling.persist.runtime.js");
   return directivePersistPromise;
+}
+
+function hasOnlyModelDirective(directives: InlineDirectives): boolean {
+  return (
+    directives.hasModelDirective &&
+    !directives.hasThinkDirective &&
+    !directives.hasFastDirective &&
+    !directives.hasVerboseDirective &&
+    !directives.hasTraceDirective &&
+    !directives.hasReasoningDirective &&
+    !directives.hasElevatedDirective &&
+    !directives.hasExecDirective &&
+    !directives.hasQueueDirective &&
+    !directives.hasStatusDirective
+  );
+}
+
+export function formatModelOverrideResetEvent(params: {
+  rejectedRef?: string;
+  initialModelLabel: string;
+}): string {
+  if (params.rejectedRef) {
+    return `Model override ${params.rejectedRef} is not allowed for this agent; reverted to ${params.initialModelLabel}. Add ${params.rejectedRef} to agents.defaults.models or pick an allowed model with /model list.`;
+  }
+  return `Model override not allowed for this agent; reverted to ${params.initialModelLabel}.`;
 }
 
 export type ApplyDirectiveResult =
@@ -163,7 +189,10 @@ export async function applyInlineDirectiveOverrides(params: {
 
   if (modelState.resetModelOverride) {
     enqueueSystemEvent(
-      `Model override not allowed for this agent; reverted to ${initialModelLabel}.`,
+      formatModelOverrideResetEvent({
+        rejectedRef: modelState.resetModelOverrideRef,
+        initialModelLabel,
+      }),
       {
         sessionKey,
         contextKey: `model:reset:${initialModelLabel}`,
@@ -179,6 +208,7 @@ export async function applyInlineDirectiveOverrides(params: {
     directives.hasThinkDirective ||
     directives.hasFastDirective ||
     directives.hasVerboseDirective ||
+    directives.hasTraceDirective ||
     directives.hasReasoningDirective ||
     directives.hasElevatedDirective ||
     directives.hasExecDirective ||
@@ -196,6 +226,31 @@ export async function applyInlineDirectiveOverrides(params: {
     };
   }
 
+  const directivePersistenceContext = {
+    directives,
+    effectiveModelDirective,
+    cfg,
+    agentDir,
+    sessionEntry,
+    sessionStore,
+    sessionKey,
+    storePath,
+    elevatedEnabled,
+    elevatedAllowed,
+    defaultProvider,
+    defaultModel,
+    aliasIndex,
+    allowedModelKeys: modelState.allowedModelKeys,
+    thinkingCatalog: modelState.allowedModelCatalog,
+    initialModelLabel,
+    formatModelSwitchEvent,
+    agentCfg,
+    messageProvider: ctx.Provider,
+    surface: ctx.Surface,
+    gatewayClientScopes: ctx.GatewayClientScopes,
+    senderIsOwner: command.senderIsOwner,
+  };
+
   if (
     isDirectiveOnly({
       directives,
@@ -209,6 +264,52 @@ export async function applyInlineDirectiveOverrides(params: {
     if (!command.isAuthorizedSender) {
       typing.cleanup();
       return { kind: "reply", reply: undefined };
+    }
+    if (hasOnlyModelDirective(directives) && effectiveModelDirective) {
+      const modelResolution = resolveModelSelectionFromDirective({
+        directives: {
+          ...directives,
+          rawModelDirective: effectiveModelDirective,
+        },
+        cfg,
+        agentDir,
+        defaultProvider,
+        defaultModel,
+        aliasIndex,
+        allowedModelKeys: modelState.allowedModelKeys,
+        allowedModelCatalog: modelState.allowedModelCatalog,
+        provider,
+      });
+      if (modelResolution.errorText) {
+        typing.cleanup();
+        return { kind: "reply", reply: { text: modelResolution.errorText } };
+      }
+      const modelSelection = modelResolution.modelSelection;
+      if (modelSelection) {
+        const persisted = await (
+          await loadDirectivePersist()
+        ).persistInlineDirectives({
+          ...directivePersistenceContext,
+          provider,
+          model,
+          markLiveSwitchPending: true,
+        });
+        const label = `${modelSelection.provider}/${modelSelection.model}`;
+        const labelWithAlias = modelSelection.alias ? `${modelSelection.alias} (${label})` : label;
+        const parts = [
+          persisted.thinkingRemap
+            ? `Thinking level set to ${persisted.thinkingRemap.to} (${persisted.thinkingRemap.from} not supported for ${persisted.thinkingRemap.provider}/${persisted.thinkingRemap.model}).`
+            : undefined,
+          modelSelection.isDefault
+            ? `Model reset to default (${labelWithAlias}).`
+            : `Model set to ${labelWithAlias}.`,
+          modelResolution.profileOverride
+            ? `Auth profile set to ${modelResolution.profileOverride}.`
+            : undefined,
+        ].filter(Boolean);
+        typing.cleanup();
+        return { kind: "reply", reply: { text: parts.join(" ") } };
+      }
     }
     const {
       currentThinkLevel: resolvedDefaultThinkLevel,
@@ -225,29 +326,35 @@ export async function applyInlineDirectiveOverrides(params: {
       resolveDefaultThinkingLevel: () => modelState.resolveDefaultThinkingLevel(),
     });
     const currentThinkLevel = resolvedDefaultThinkLevel;
+    const thinkingCatalog = await modelState.resolveThinkingCatalog();
     const directiveReply = await (
       await loadDirectiveImpl()
     ).handleDirectiveOnly({
       ...createDirectiveHandlingBase(),
+      thinkingCatalog,
       currentThinkLevel,
       currentFastMode,
       currentVerboseLevel,
       currentReasoningLevel,
       currentElevatedLevel,
+      ctx,
       messageProvider: ctx.Provider,
       surface: ctx.Surface,
       gatewayClientScopes: ctx.GatewayClientScopes,
+      senderIsOwner: command.senderIsOwner,
     });
     let statusReply: ReplyPayload | undefined;
     if (directives.hasStatusDirective && allowTextCommands && command.isAuthorizedSender) {
       const { buildStatusReply } = await loadCommandsStatus();
+      const targetSessionEntry = sessionStore[sessionKey] ?? sessionEntry;
       statusReply = await buildStatusReply({
         cfg,
         command,
-        sessionEntry,
+        sessionEntry: targetSessionEntry,
         sessionKey,
-        parentSessionKey: ctx.ParentSessionKey,
+        parentSessionKey: targetSessionEntry?.parentSessionKey ?? ctx.ParentSessionKey,
         sessionScope,
+        storePath,
         provider,
         model,
         contextTokens,
@@ -277,6 +384,7 @@ export async function applyInlineDirectiveOverrides(params: {
     ).applyInlineDirectivesFastLane({
       directives,
       commandAuthorized: command.isAuthorizedSender,
+      senderIsOwner: command.senderIsOwner,
       ctx,
       cfg,
       agentId,
@@ -300,6 +408,7 @@ export async function applyInlineDirectiveOverrides(params: {
       agentCfg,
       modelState: {
         resolveDefaultThinkingLevel: modelState.resolveDefaultThinkingLevel,
+        resolveThinkingCatalog: modelState.resolveThinkingCatalog,
         ...directiveModelState,
       },
     });
@@ -311,28 +420,9 @@ export async function applyInlineDirectiveOverrides(params: {
   const persisted = await (
     await loadDirectivePersist()
   ).persistInlineDirectives({
-    directives,
-    effectiveModelDirective,
-    cfg,
-    agentDir,
-    sessionEntry,
-    sessionStore,
-    sessionKey,
-    storePath,
-    elevatedEnabled,
-    elevatedAllowed,
-    defaultProvider,
-    defaultModel,
-    aliasIndex,
-    allowedModelKeys: modelState.allowedModelKeys,
+    ...directivePersistenceContext,
     provider,
     model,
-    initialModelLabel,
-    formatModelSwitchEvent,
-    agentCfg,
-    messageProvider: ctx.Provider,
-    surface: ctx.Surface,
-    gatewayClientScopes: ctx.GatewayClientScopes,
   });
   provider = persisted.provider;
   model = persisted.model;

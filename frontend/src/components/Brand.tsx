@@ -6,7 +6,7 @@ export default function Brand() {
       </div>
       <div>
         <div className="text-sm font-semibold text-dark-text">OpenClaw AI</div>
-        <div className="text-xs text-dark-text-secondary">Multi User OpenClaw v2026.04.11</div>
+        <div className="text-xs text-dark-text-secondary">Multi User OpenClaw v2026.05.10</div>
       </div>
     </div>
   )

@@ -1,14 +1,18 @@
 import { registerSkillsChangeListener } from "../agents/skills/refresh.js";
-import type { OpenClawConfig } from "../config/config.js";
 import type { GatewayTailscaleMode } from "../config/types.gateway.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { resolveCronStorePath } from "../cron/store.js";
 import { getMachineDisplayName } from "../infra/machine-name.js";
 import {
   primeRemoteSkillsCache,
   refreshRemoteBinsForConnectedNodes,
   setSkillsRemoteRegistry,
 } from "../infra/skills-remote.js";
-import { startTaskRegistryMaintenance } from "../tasks/task-registry.maintenance.js";
-import { startMcpLoopbackServer } from "./mcp-http.js";
+import type { PluginRegistry } from "../plugins/registry-types.js";
+import {
+  configureTaskRegistryMaintenance,
+  startTaskRegistryMaintenance,
+} from "../tasks/task-registry.maintenance.js";
 import { startGatewayDiscovery } from "./server-discovery-runtime.js";
 import { startGatewayMaintenanceTimers } from "./server-maintenance.js";
 
@@ -27,6 +31,7 @@ export async function startGatewayEarlyRuntime(params: {
     warn: (msg: string) => void;
   };
   nodeRegistry: Parameters<typeof setSkillsRemoteRegistry>[0];
+  pluginRegistry?: PluginRegistry;
   broadcast: Parameters<typeof startGatewayMaintenanceTimers>[0]["broadcast"];
   nodeSendToAllSubscribed: Parameters<
     typeof startGatewayMaintenanceTimers
@@ -52,16 +57,8 @@ export async function startGatewayEarlyRuntime(params: {
   skillsRefreshDelayMs: number;
   getSkillsRefreshTimer: () => ReturnType<typeof setTimeout> | null;
   setSkillsRefreshTimer: (timer: ReturnType<typeof setTimeout> | null) => void;
-  loadConfig: () => OpenClawConfig;
+  getRuntimeConfig: () => OpenClawConfig;
 }) {
-  let mcpServer: { port: number; close: () => Promise<void> } | undefined;
-  try {
-    mcpServer = await startMcpLoopbackServer(0);
-    params.log.info(`MCP loopback server listening on http://127.0.0.1:${mcpServer.port}/mcp`);
-  } catch (error) {
-    params.log.warn(`MCP loopback server failed to start: ${String(error)}`);
-  }
-
   let bonjourStop: (() => Promise<void>) | null = null;
   if (!params.minimalTestGateway) {
     const machineDisplayName = await getMachineDisplayName();
@@ -75,6 +72,7 @@ export async function startGatewayEarlyRuntime(params: {
       wideAreaDiscoveryDomain: params.cfgAtStart.discovery?.wideArea?.domain,
       tailscaleMode: params.tailscaleMode,
       mdnsMode: params.cfgAtStart.discovery?.mdns?.mode,
+      gatewayDiscoveryServices: params.pluginRegistry?.gatewayDiscoveryServices,
       logDiscovery: params.logDiscovery,
     });
     bonjourStop = discovery.bonjourStop;
@@ -83,6 +81,10 @@ export async function startGatewayEarlyRuntime(params: {
   if (!params.minimalTestGateway) {
     setSkillsRemoteRegistry(params.nodeRegistry);
     void primeRemoteSkillsCache();
+    configureTaskRegistryMaintenance({
+      cronStorePath: resolveCronStorePath(params.cfgAtStart.cron?.store),
+      cronRuntimeAuthoritative: true,
+    });
     startTaskRegistryMaintenance();
   }
 
@@ -98,7 +100,7 @@ export async function startGatewayEarlyRuntime(params: {
         }
         const nextTimer = setTimeout(() => {
           params.setSkillsRefreshTimer(null);
-          void refreshRemoteBinsForConnectedNodes(params.loadConfig());
+          void refreshRemoteBinsForConnectedNodes(params.getRuntimeConfig());
         }, params.skillsRefreshDelayMs);
         params.setSkillsRefreshTimer(nextTimer);
       });
@@ -127,7 +129,6 @@ export async function startGatewayEarlyRuntime(params: {
       });
 
   return {
-    mcpServer,
     bonjourStop,
     skillsChangeUnsub,
     maintenance,

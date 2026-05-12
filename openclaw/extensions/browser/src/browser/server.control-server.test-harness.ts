@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, vi } from "vitest";
+import { deriveDefaultBrowserCdpPortRange } from "../config/port-defaults.js";
 import type { MockFn } from "../test-utils/vitest-mock-fn.js";
 import { installChromeUserDataDirHooks } from "./chrome-user-data-dir.test-harness.js";
 import { getFreePort } from "./test-port.js";
@@ -89,10 +90,23 @@ const cdpMocks = vi.hoisted(() => ({
   snapshotAria: vi.fn(async () => ({
     nodes: [{ ref: "1", role: "link", name: "x", depth: 0 }],
   })),
+  snapshotRoleViaCdp: vi.fn(async () => ({
+    snapshot: '- button "Fallback" [ref=e1]',
+    refs: { e1: { role: "button", name: "Fallback" } },
+    stats: { lines: 1, chars: 29, refs: 1, interactive: 1 },
+  })),
 }));
 
-export function getCdpMocks(): { createTargetViaCdp: MockFn; snapshotAria: MockFn } {
-  return cdpMocks as unknown as { createTargetViaCdp: MockFn; snapshotAria: MockFn };
+export function getCdpMocks(): {
+  createTargetViaCdp: MockFn;
+  snapshotAria: MockFn;
+  snapshotRoleViaCdp: MockFn;
+} {
+  return cdpMocks as unknown as {
+    createTargetViaCdp: MockFn;
+    snapshotAria: MockFn;
+    snapshotRoleViaCdp: MockFn;
+  };
 }
 
 type ExecuteActMockAction = { kind: string } & Record<string, unknown>;
@@ -146,6 +160,7 @@ const pwMocks = vi.hoisted(() => ({
   armDialogViaPlaywright: vi.fn(async () => {}),
   armFileUploadViaPlaywright: vi.fn(async () => {}),
   batchViaPlaywright: vi.fn(async (_opts?: unknown) => ({ results: [] })),
+  clickCoordsViaPlaywright: vi.fn(async (_opts?: unknown) => {}),
   clickViaPlaywright: vi.fn(async (_opts?: unknown) => {}),
   closePageViaPlaywright: vi.fn(async (_opts?: unknown) => {}),
   closePlaywrightBrowserConnection: vi.fn(async () => {}),
@@ -173,6 +188,12 @@ const pwMocks = vi.hoisted(() => ({
   selectOptionViaPlaywright: vi.fn(async (_opts?: unknown) => {}),
   setInputFilesViaPlaywright: vi.fn(async () => {}),
   snapshotAiViaPlaywright: vi.fn(async () => ({ snapshot: "ok" })),
+  snapshotRoleViaPlaywright: vi.fn(async () => ({
+    snapshot: '- button "Role" [ref=e1]',
+    refs: { e1: { role: "button", name: "Role" } },
+    stats: { lines: 1, chars: 24, refs: 1, interactive: 1 },
+  })),
+  storeAriaSnapshotRefsViaPlaywright: vi.fn(async () => {}),
   traceStopViaPlaywright: vi.fn(async () => {}),
   takeScreenshotViaPlaywright: vi.fn(async () => ({
     buffer: Buffer.from("png"),
@@ -191,6 +212,11 @@ const passThroughActDispatch: Record<string, PassThroughActDispatch> = {
   click: {
     mock: pwMocks.clickViaPlaywright,
     fields: ["ref", "selector", "doubleClick", "button", "modifiers", "delayMs", "timeoutMs"],
+    includeSsrf: true,
+  },
+  clickCoords: {
+    mock: pwMocks.clickCoordsViaPlaywright,
+    fields: ["x", "y", "doubleClick", "button", "delayMs", "timeoutMs"],
     includeSsrf: true,
   },
   type: {
@@ -300,6 +326,7 @@ export function getPwMocks(): Record<string, MockFn> {
 }
 
 const chromeMcpMocks = vi.hoisted(() => ({
+  clickChromeMcpCoords: vi.fn(async () => {}),
   clickChromeMcpElement: vi.fn(async () => {}),
   closeChromeMcpSession: vi.fn(async () => true),
   closeChromeMcpTab: vi.fn(async () => {}),
@@ -340,18 +367,6 @@ export function getChromeMcpMocks(): Record<string, MockFn> {
 const chromeUserDataDir = vi.hoisted(() => ({ dir: "/tmp/openclaw" }));
 installChromeUserDataDirHooks(chromeUserDataDir);
 
-type BrowserServerModule = typeof import("../server.js");
-let browserServerModule: BrowserServerModule | null = null;
-
-async function loadBrowserServerModule(): Promise<BrowserServerModule> {
-  if (browserServerModule) {
-    return browserServerModule;
-  }
-  vi.resetModules();
-  browserServerModule = await import("../server.js");
-  return browserServerModule;
-}
-
 function makeProc(pid = 123) {
   const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
   return {
@@ -375,9 +390,13 @@ function makeProc(pid = 123) {
 
 const proc = makeProc();
 
+function defaultBrowserCdpPortForState(testPort: number): number {
+  return deriveDefaultBrowserCdpPortRange(testPort).start;
+}
+
 function defaultProfilesForState(testPort: number): HarnessState["cfgProfiles"] {
   return {
-    openclaw: { cdpPort: testPort + 9, color: "#FF4500" },
+    openclaw: { cdpPort: defaultBrowserCdpPortForState(testPort), color: "#FF4500" },
   };
 }
 
@@ -407,6 +426,7 @@ vi.mock("../config/config.js", async () => {
       loadConfig,
       writeConfigFile,
     })),
+    getRuntimeConfig: loadConfig,
     getRuntimeConfigSnapshot: vi.fn(() => null),
     loadConfig,
     writeConfigFile,
@@ -444,6 +464,7 @@ vi.mock("./cdp.js", () => ({
   createTargetViaCdp: cdpMocks.createTargetViaCdp,
   normalizeCdpWsUrl: vi.fn((wsUrl: string) => wsUrl),
   snapshotAria: cdpMocks.snapshotAria,
+  snapshotRoleViaCdp: cdpMocks.snapshotRoleViaCdp,
   getHeadersWithAuth: vi.fn(() => ({})),
   appendCdpPath: vi.fn((cdpUrl: string, cdpPath: string) => {
     const base = cdpUrl.replace(/\/$/, "");
@@ -472,18 +493,19 @@ vi.mock("./screenshot.js", () => ({
   })),
 }));
 
+let browserServerModulePromise: Promise<typeof import("../server.js")> | undefined;
+
+async function loadBrowserServerModule() {
+  browserServerModulePromise ??= import("../server.js");
+  return await browserServerModulePromise;
+}
+
 export async function startBrowserControlServerFromConfig() {
-  const server = await loadBrowserServerModule();
-  return await server.startBrowserControlServerFromConfig();
+  return await (await loadBrowserServerModule()).startBrowserControlServerFromConfig();
 }
 
 export async function stopBrowserControlServer(): Promise<void> {
-  const server = browserServerModule;
-  browserServerModule = null;
-  if (!server) {
-    return;
-  }
-  await server.stopBrowserControlServer();
+  await (await loadBrowserServerModule()).stopBrowserControlServer();
 }
 
 export function makeResponse(
@@ -520,7 +542,7 @@ export async function resetBrowserControlServerTestContext(): Promise<void> {
   mockClearAll(chromeMcpMocks);
 
   state.testPort = await getFreePort();
-  state.cdpBaseUrl = `http://127.0.0.1:${state.testPort + 9}`;
+  state.cdpBaseUrl = `http://127.0.0.1:${defaultBrowserCdpPortForState(state.testPort)}`;
   state.cfgProfiles = defaultProfilesForState(state.testPort);
   state.prevGatewayPort = process.env.OPENCLAW_GATEWAY_PORT;
   process.env.OPENCLAW_GATEWAY_PORT = String(state.testPort - 2);
@@ -568,14 +590,12 @@ export function installBrowserControlServerHooks() {
     });
 
     await resetBrowserControlServerTestContext();
-    await loadBrowserServerModule();
-
     // Minimal CDP JSON endpoints used by the server.
     let putNewCalls = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
-        const u = String(url);
+        const u = url;
         if (u.includes("/json/list")) {
           if (!state.reachable) {
             return makeResponse([]);

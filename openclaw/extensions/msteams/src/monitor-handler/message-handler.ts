@@ -1,21 +1,24 @@
+import { formatAllowlistMatchMeta } from "openclaw/plugin-sdk/allow-from";
 import { resolveInboundMentionDecision } from "openclaw/plugin-sdk/channel-inbound";
-import { resolveThreadSessionKeys } from "openclaw/plugin-sdk/routing";
+import {
+  logInboundDrop,
+  resolveInboundSessionEnvelopeContext,
+} from "openclaw/plugin-sdk/channel-inbound";
+import { resolveDualTextControlCommandGate } from "openclaw/plugin-sdk/command-gating";
+import {
+  filterSupplementalContextItems,
+  resolveChannelContextVisibilityMode,
+  shouldIncludeSupplementalContext,
+} from "openclaw/plugin-sdk/context-visibility-runtime";
+import { evaluateSenderGroupAccessForPolicy } from "openclaw/plugin-sdk/group-access";
+import { dispatchReplyFromConfigWithSettledDispatcher } from "openclaw/plugin-sdk/inbound-reply-dispatch";
 import {
   buildPendingHistoryContextFromMap,
   clearHistoryEntriesIfEnabled,
-  dispatchReplyFromConfigWithSettledDispatcher,
   DEFAULT_GROUP_HISTORY_LIMIT,
-  logInboundDrop,
-  evaluateSenderGroupAccessForPolicy,
-  filterSupplementalContextItems,
   recordPendingHistoryEntryIfEnabled,
-  resolveChannelContextVisibilityMode,
-  resolveDualTextControlCommandGate,
-  resolveInboundSessionEnvelopeContext,
-  shouldIncludeSupplementalContext,
-  formatAllowlistMatchMeta,
   type HistoryEntry,
-} from "../../runtime-api.js";
+} from "openclaw/plugin-sdk/reply-history";
 import {
   buildMSTeamsAttachmentPlaceholder,
   buildMSTeamsMediaPayload,
@@ -95,6 +98,7 @@ import type { MSTeamsTurnContext } from "../sdk-types.js";
 import { recordMSTeamsSentMessage, wasMSTeamsMessageSent } from "../sent-message-cache.js";
 import { resolveMSTeamsSenderAccess } from "./access.js";
 import { resolveMSTeamsInboundMedia } from "./inbound-media.js";
+import { resolveMSTeamsRouteSessionKey } from "./thread-session.js";
 
 function buildStoredConversationReference(params: {
   activity: MSTeamsTurnContext["activity"];
@@ -476,15 +480,12 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
     // ;messageid= portion of conversation.id, i.e. the thread root) over
     // activity.replyToId (which may point to a non-root parent in deep threads).
     // DMs and group chats are unaffected — only channel thread replies fork.
-    const channelThreadId = isChannel
-      ? (conversationMessageId ?? activity.replyToId ?? undefined)
-      : undefined;
-    const threadKeys = resolveThreadSessionKeys({
+    route.sessionKey = resolveMSTeamsRouteSessionKey({
       baseSessionKey: route.sessionKey,
-      threadId: channelThreadId,
-      parentSessionKey: channelThreadId ? route.sessionKey : undefined,
+      isChannel,
+      conversationMessageId,
+      replyToId: activity.replyToId,
     });
-    route.sessionKey = threadKeys.sessionKey;
 
     const preview = rawBody.replace(/\s+/g, " ").slice(0, 160);
     const inboundLabel = isDirectMessage
@@ -513,7 +514,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       },
       policy: {
         isGroup: !isDirectMessage,
-        requireMention: Boolean(requireMention),
+        requireMention,
         allowTextCommands: false,
         hasControlCommand: false,
         commandAuthorized: false,
@@ -752,6 +753,13 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       ? `[Thread history]\n${threadContext}\n[/Thread history]\n\n${rawBody}`
       : rawBody;
 
+    // For Teams *channel* messages (not group chats / DMs), preserve the
+    // `teamId/channelId` pair on NativeChannelId so downstream action handlers
+    // can route through `/teams/{teamId}/channels/{channelId}` via Graph API.
+    // The bare conversation id (`19:...@thread.tacv2`) is insufficient on its
+    // own because channel Graph endpoints require the owning team id too.
+    const nativeChannelId = isChannel && teamId ? `${teamId}/${conversationId}` : undefined;
+
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: combinedBody,
       BodyForAgent: bodyForAgent,
@@ -766,6 +774,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       ChatType: isDirectMessage ? "direct" : isChannel ? "channel" : "group",
       ConversationLabel: envelopeFrom,
       GroupSubject: !isDirectMessage ? conversationType : undefined,
+      GroupSpace: teamId,
       SenderName: senderName,
       SenderId: senderId,
       Provider: "msteams" as const,
@@ -776,6 +785,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       CommandAuthorized: commandAuthorized,
       OriginatingChannel: "msteams" as const,
       OriginatingTo: teamsTo,
+      NativeChannelId: nativeChannelId,
       ReplyToId: activity.replyToId ?? undefined,
       ReplyToBody: includeQuoteContext ? quoteInfo?.body : undefined,
       ReplyToSender: includeQuoteContext ? quoteInfo?.sender : undefined,

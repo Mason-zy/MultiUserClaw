@@ -1,20 +1,28 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { withTempHome } from "openclaw/plugin-sdk/test-env";
 import { describe, expect, it, vi } from "vitest";
-import { withTempHome } from "../../test/helpers/temp-home.js";
 import { setupCommand } from "./setup.js";
 
 function createSetupDeps(home: string) {
   const configPath = path.join(home, ".openclaw", "openclaw.json");
   return {
+    createConfigIO: () => ({ configPath }),
     ensureAgentWorkspace: vi.fn(async (params?: { dir?: string }) => ({
       dir: params?.dir ?? path.join(home, ".openclaw", "workspace"),
     })),
+    formatConfigPath: (value: string) => value,
+    logConfigUpdated: vi.fn(
+      (runtime: { log: (message: string) => void }, opts: { path?: string; suffix?: string }) => {
+        const suffix = opts.suffix ? ` ${opts.suffix}` : "";
+        runtime.log(`Updated ${opts.path}${suffix}`);
+      },
+    ),
     mkdir: vi.fn(async () => {}),
     resolveSessionTranscriptsDir: vi.fn(() => path.join(home, ".openclaw", "sessions")),
-    writeConfigFile: vi.fn(async (config: unknown) => {
+    replaceConfigFile: vi.fn(async ({ nextConfig }: { nextConfig: unknown }) => {
       await fs.mkdir(path.dirname(configPath), { recursive: true });
-      await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+      await fs.writeFile(configPath, JSON.stringify(nextConfig, null, 2));
     }),
   };
 }

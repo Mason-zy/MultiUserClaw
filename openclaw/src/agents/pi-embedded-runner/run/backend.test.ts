@@ -2,20 +2,19 @@ import { describe, expect, it } from "vitest";
 import { resolveEmbeddedAgentHarnessFallback, resolveEmbeddedAgentRuntime } from "../runtime.js";
 
 describe("resolveEmbeddedAgentRuntime", () => {
-  it("uses auto mode by default", () => {
-    expect(resolveEmbeddedAgentRuntime({})).toBe("auto");
+  it("uses PI mode by default", () => {
+    expect(resolveEmbeddedAgentRuntime({})).toBe("pi");
   });
 
   it("accepts the PI kill switch", () => {
     expect(resolveEmbeddedAgentRuntime({ OPENCLAW_AGENT_RUNTIME: "pi" })).toBe("pi");
   });
 
-  it("accepts codex app-server aliases", () => {
+  it("canonicalizes legacy Codex app-server runtime ids", () => {
+    expect(resolveEmbeddedAgentRuntime({ OPENCLAW_AGENT_RUNTIME: "codex" })).toBe("codex");
     expect(resolveEmbeddedAgentRuntime({ OPENCLAW_AGENT_RUNTIME: "codex-app-server" })).toBe(
       "codex",
     );
-    expect(resolveEmbeddedAgentRuntime({ OPENCLAW_AGENT_RUNTIME: "codex" })).toBe("codex");
-    expect(resolveEmbeddedAgentRuntime({ OPENCLAW_AGENT_RUNTIME: "app-server" })).toBe("codex");
   });
 
   it("accepts auto mode", () => {

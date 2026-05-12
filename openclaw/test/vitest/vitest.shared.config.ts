@@ -1,25 +1,19 @@
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pluginSdkSubpaths } from "../../scripts/lib/plugin-sdk-entries.mjs";
+import privateLocalOnlyPluginSdkSubpaths from "../../scripts/lib/plugin-sdk-private-local-only-subpaths.json" with { type: "json" };
+import {
+  detectVitestHostInfo as detectVitestHostInfoImpl,
+  isCiLikeEnv,
+  resolveLocalVitestMaxWorkers as resolveLocalVitestMaxWorkersImpl,
+  resolveLocalVitestScheduling as resolveLocalVitestSchedulingImpl,
+} from "../../scripts/lib/vitest-local-scheduling.mjs";
 import {
   BUNDLED_PLUGIN_ROOT_DIR,
   BUNDLED_PLUGIN_TEST_GLOB,
 } from "./vitest.bundled-plugin-paths.ts";
 import { loadVitestExperimentalConfig } from "./vitest.performance-config.ts";
 import { shouldPrintVitestThrottle } from "./vitest.system-load.ts";
-
-const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-
-function parsePositiveInt(value: string | undefined): number | null {
-  const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
-function isSystemThrottleDisabled(env: Record<string, string | undefined>): boolean {
-  const normalized = env.OPENCLAW_VITEST_DISABLE_SYSTEM_THROTTLE?.trim().toLowerCase();
-  return normalized === "1" || normalized === "true";
-}
 
 type VitestHostInfo = {
   cpuCount?: number;
@@ -45,12 +39,7 @@ export const jsdomOptimizedDeps = {
 };
 
 function detectVitestHostInfo(): Required<VitestHostInfo> {
-  return {
-    cpuCount:
-      typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length,
-    loadAverage1m: os.loadavg()[0] ?? 0,
-    totalMemoryBytes: os.totalmem(),
-  };
+  return detectVitestHostInfoImpl() as Required<VitestHostInfo>;
 }
 
 export function resolveLocalVitestMaxWorkers(
@@ -58,7 +47,7 @@ export function resolveLocalVitestMaxWorkers(
   system: VitestHostInfo = detectVitestHostInfo(),
   pool: OpenClawVitestPool = resolveDefaultVitestPool(env),
 ): number {
-  return resolveLocalVitestScheduling(env, system, pool).maxWorkers;
+  return resolveLocalVitestMaxWorkersImpl(env, system, pool);
 }
 
 export function resolveLocalVitestScheduling(
@@ -66,91 +55,7 @@ export function resolveLocalVitestScheduling(
   system: VitestHostInfo = detectVitestHostInfo(),
   pool: OpenClawVitestPool = resolveDefaultVitestPool(env),
 ): LocalVitestScheduling {
-  const override = parsePositiveInt(env.OPENCLAW_VITEST_MAX_WORKERS ?? env.OPENCLAW_TEST_WORKERS);
-  if (override !== null) {
-    const maxWorkers = clamp(override, 1, 16);
-    return {
-      maxWorkers,
-      fileParallelism: maxWorkers > 1,
-      throttledBySystem: false,
-    };
-  }
-
-  const cpuCount = Math.max(1, system.cpuCount ?? 1);
-  const loadAverage1m = Math.max(0, system.loadAverage1m ?? 0);
-  const totalMemoryGb = (system.totalMemoryBytes ?? 0) / 1024 ** 3;
-
-  // Keep smaller hosts conservative, but let large local boxes actually use
-  // their cores. Thread workers scale much better than the old fork-first cap.
-  let inferred =
-    cpuCount <= 2
-      ? 1
-      : cpuCount <= 4
-        ? 2
-        : cpuCount <= 8
-          ? 4
-          : Math.max(1, Math.floor(cpuCount * 0.75));
-
-  if (totalMemoryGb <= 16) {
-    inferred = Math.min(inferred, 2);
-  } else if (totalMemoryGb <= 32) {
-    inferred = Math.min(inferred, 4);
-  } else if (totalMemoryGb <= 64) {
-    inferred = Math.min(inferred, 6);
-  } else if (totalMemoryGb <= 128) {
-    inferred = Math.min(inferred, 8);
-  } else if (totalMemoryGb <= 256) {
-    inferred = Math.min(inferred, 12);
-  } else {
-    inferred = Math.min(inferred, 16);
-  }
-
-  const loadRatio = loadAverage1m > 0 ? loadAverage1m / cpuCount : 0;
-  if (loadRatio >= 1) {
-    inferred = Math.max(1, Math.floor(inferred / 2));
-  } else if (loadRatio >= 0.75) {
-    inferred = Math.max(1, inferred - 2);
-  } else if (loadRatio >= 0.5) {
-    inferred = Math.max(1, inferred - 1);
-  }
-
-  if (pool === "forks") {
-    inferred = Math.min(inferred, 8);
-  }
-
-  inferred = clamp(inferred, 1, 16);
-
-  if (isSystemThrottleDisabled(env)) {
-    return {
-      maxWorkers: inferred,
-      fileParallelism: true,
-      throttledBySystem: false,
-    };
-  }
-
-  if (loadRatio >= 1) {
-    const maxWorkers = Math.max(1, Math.floor(inferred / 2));
-    return {
-      maxWorkers,
-      fileParallelism: maxWorkers > 1,
-      throttledBySystem: maxWorkers < inferred,
-    };
-  }
-
-  if (loadRatio >= 0.75) {
-    const maxWorkers = Math.max(2, Math.ceil(inferred * 0.75));
-    return {
-      maxWorkers,
-      fileParallelism: true,
-      throttledBySystem: maxWorkers < inferred,
-    };
-  }
-
-  return {
-    maxWorkers: inferred,
-    fileParallelism: true,
-    throttledBySystem: false,
-  };
+  return resolveLocalVitestSchedulingImpl(env, system, pool) as LocalVitestScheduling;
 }
 
 export function resolveDefaultVitestPool(
@@ -164,7 +69,7 @@ export const nonIsolatedRunnerPath = path.join(repoRoot, "test", "non-isolated-r
 export function resolveRepoRootPath(value: string): string {
   return path.isAbsolute(value) ? value : path.join(repoRoot, value);
 }
-const isCI = process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true";
+const isCI = isCiLikeEnv(process.env);
 const isWindows = process.platform === "win32";
 const defaultPool = resolveDefaultVitestPool();
 const localScheduling = resolveLocalVitestScheduling(
@@ -172,7 +77,46 @@ const localScheduling = resolveLocalVitestScheduling(
   detectVitestHostInfo(),
   defaultPool,
 );
-const ciWorkers = isWindows ? 2 : 3;
+
+function hasWorkerOverride(env: Record<string, string | undefined>): boolean {
+  return Boolean((env.OPENCLAW_VITEST_MAX_WORKERS ?? env.OPENCLAW_TEST_WORKERS)?.trim());
+}
+
+export function resolveSharedVitestWorkerConfig(params: {
+  env?: Record<string, string | undefined>;
+  isCI?: boolean;
+  isWindows?: boolean;
+  localScheduling?: LocalVitestScheduling;
+}): Pick<LocalVitestScheduling, "fileParallelism" | "maxWorkers"> {
+  const env = params.env ?? process.env;
+  const local = params.localScheduling ?? localScheduling;
+  if (hasWorkerOverride(env)) {
+    return {
+      fileParallelism: local.fileParallelism,
+      maxWorkers: local.maxWorkers,
+    };
+  }
+  if (params.isCI ?? isCI) {
+    return {
+      fileParallelism: true,
+      maxWorkers: (params.isWindows ?? isWindows) ? 2 : 3,
+    };
+  }
+  return {
+    fileParallelism: local.fileParallelism,
+    maxWorkers: local.maxWorkers,
+  };
+}
+
+const workerConfig = resolveSharedVitestWorkerConfig({
+  env: process.env,
+  isCI,
+  isWindows,
+  localScheduling,
+});
+const sourcePluginSdkSubpaths = [
+  ...new Set([...pluginSdkSubpaths, ...privateLocalOnlyPluginSdkSubpaths]),
+].toSorted((left, right) => left.localeCompare(right));
 
 if (!isCI && localScheduling.throttledBySystem && shouldPrintVitestThrottle(process.env)) {
   console.error(
@@ -184,13 +128,18 @@ if (!isCI && localScheduling.throttledBySystem && shouldPrintVitestThrottle(proc
 
 export const sharedVitestConfig = {
   root: repoRoot,
+  envFile: false,
   resolve: {
     alias: [
       {
         find: "openclaw/extension-api",
         replacement: path.join(repoRoot, "src", "extensionAPI.ts"),
       },
-      ...pluginSdkSubpaths.map((subpath) => ({
+      {
+        find: "@openclaw/qa-channel/api.js",
+        replacement: path.join(repoRoot, "extensions", "qa-channel", "api.ts"),
+      },
+      ...sourcePluginSdkSubpaths.map((subpath) => ({
         find: `openclaw/plugin-sdk/${subpath}`,
         replacement: path.join(repoRoot, "src", "plugin-sdk", `${subpath}.ts`),
       })),
@@ -213,8 +162,8 @@ export const sharedVitestConfig = {
     isolate: false,
     pool: defaultPool,
     runner: nonIsolatedRunnerPath,
-    maxWorkers: isCI ? ciWorkers : localScheduling.maxWorkers,
-    fileParallelism: isCI ? true : localScheduling.fileParallelism,
+    maxWorkers: workerConfig.maxWorkers,
+    fileParallelism: workerConfig.fileParallelism,
     forceRerunTriggers: [
       "package.json",
       "pnpm-lock.yaml",
@@ -223,13 +172,23 @@ export const sharedVitestConfig = {
       "test/setup.extensions.ts",
       "test/setup-openclaw-runtime.ts",
       "test/vitest/vitest.channel-paths.mjs",
+      "test/vitest/vitest.agents-paths.mjs",
+      "test/vitest/vitest.agents-core.config.ts",
+      "test/vitest/vitest.agents-pi-embedded.config.ts",
+      "test/vitest/vitest.agents-support.config.ts",
+      "test/vitest/vitest.agents-tools.config.ts",
       "test/vitest/vitest.channels.config.ts",
       "test/vitest/vitest.acp.config.ts",
       "test/vitest/vitest.boundary.config.ts",
       "test/vitest/vitest.bundled.config.ts",
       "test/vitest/vitest.cli.config.ts",
       "vitest.config.ts",
-      "test/vitest/vitest.contracts.config.ts",
+      "test/vitest/vitest.contracts-shared.ts",
+      "test/vitest/vitest.contracts-channel-surface.config.ts",
+      "test/vitest/vitest.contracts-channel-config.config.ts",
+      "test/vitest/vitest.contracts-channel-registry.config.ts",
+      "test/vitest/vitest.contracts-channel-session.config.ts",
+      "test/vitest/vitest.contracts-plugin.config.ts",
       "test/vitest/vitest.cron.config.ts",
       "test/vitest/vitest.daemon.config.ts",
       "test/vitest/vitest.e2e.config.ts",
@@ -237,13 +196,18 @@ export const sharedVitestConfig = {
       "test/vitest/vitest.extension-acpx.config.ts",
       "test/vitest/vitest.extension-bluebubbles-paths.mjs",
       "test/vitest/vitest.extension-bluebubbles.config.ts",
+      "test/vitest/vitest.extension-channel-single-config.ts",
+      "test/vitest/vitest.extension-channel-split-paths.mjs",
       "test/vitest/vitest.extension-channels.config.ts",
       "test/vitest/vitest.extension-diffs-paths.mjs",
       "test/vitest/vitest.extension-diffs.config.ts",
+      "test/vitest/vitest.extension-discord.config.ts",
       "test/vitest/vitest.extension-feishu-paths.mjs",
       "test/vitest/vitest.extension-feishu.config.ts",
+      "test/vitest/vitest.extension-imessage.config.ts",
       "test/vitest/vitest.extension-irc-paths.mjs",
       "test/vitest/vitest.extension-irc.config.ts",
+      "test/vitest/vitest.extension-line.config.ts",
       "test/vitest/vitest.extension-mattermost-paths.mjs",
       "test/vitest/vitest.extension-mattermost.config.ts",
       "test/vitest/vitest.extension-matrix-paths.mjs",
@@ -290,7 +254,10 @@ export const sharedVitestConfig = {
       "test/vitest/vitest.extension-zalo-paths.mjs",
       "test/vitest/vitest.extension-zalo.config.ts",
       "test/vitest/vitest.extension-provider-paths.mjs",
+      "test/vitest/vitest.extension-provider-openai.config.ts",
       "test/vitest/vitest.extension-providers.config.ts",
+      "test/vitest/vitest.extension-signal.config.ts",
+      "test/vitest/vitest.extension-slack.config.ts",
       "test/vitest/vitest.logging.config.ts",
       "test/vitest/vitest.process.config.ts",
       "test/vitest/vitest.tasks.config.ts",
@@ -341,7 +308,6 @@ export const sharedVitestConfig = {
         branches: 55,
         statements: 70,
       },
-      include: ["./src/**/*.ts"],
       exclude: [
         `${BUNDLED_PLUGIN_ROOT_DIR}/**`,
         "apps/**",

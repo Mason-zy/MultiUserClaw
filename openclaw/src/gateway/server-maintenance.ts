@@ -26,7 +26,10 @@ export function startGatewayMaintenanceTimers(params: {
   nodeSendToAllSubscribed: (event: string, payload: unknown) => void;
   getPresenceVersion: () => number;
   getHealthVersion: () => number;
-  refreshGatewayHealthSnapshot: (opts?: { probe?: boolean }) => Promise<HealthSummary>;
+  refreshGatewayHealthSnapshot: (opts?: {
+    probe?: boolean;
+    includeSensitive?: boolean;
+  }) => Promise<HealthSummary>;
   logHealth: { error: (msg: string) => void };
   dedupe: Map<string, DedupeEntry>;
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
@@ -61,7 +64,7 @@ export function startGatewayMaintenanceTimers(params: {
   // periodic keepalive
   const tickInterval = setInterval(() => {
     const payload = { ts: Date.now() };
-    params.broadcast("tick", payload, { dropIfSlow: true });
+    params.broadcast("tick", payload);
     params.nodeSendToAllSubscribed("tick", payload);
   }, TICK_INTERVAL_MS);
 

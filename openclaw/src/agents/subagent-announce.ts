@@ -1,4 +1,10 @@
-import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+import {
+  isSilentReplyText,
+  SILENT_REPLY_TOKEN,
+  startsWithSilentToken,
+  stripLeadingSilentToken,
+  stripSilentToken,
+} from "../auto-reply/tokens.js";
 import { defaultRuntime } from "../runtime.js";
 import { isCronSessionKey } from "../sessions/session-key-utils.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
@@ -17,6 +23,7 @@ import {
   resolveSubagentAnnounceTimeoutMs,
   resolveSubagentCompletionOrigin,
 } from "./subagent-announce-delivery.js";
+import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import { resolveAnnounceOrigin } from "./subagent-announce-origin.js";
 import {
   applySubagentWaitOutcome,
@@ -32,21 +39,23 @@ import {
 import {
   callGateway,
   isEmbeddedPiRunActive,
-  loadConfig,
+  getRuntimeConfig,
   waitForEmbeddedPiRunEnd,
 } from "./subagent-announce.runtime.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
-import type { SpawnSubagentMode } from "./subagent-spawn.js";
+import type { SpawnSubagentMode } from "./subagent-spawn.types.js";
 import { isAnnounceSkip } from "./tools/sessions-send-tokens.js";
 
 type SubagentAnnounceDeps = {
   callGateway: typeof callGateway;
-  loadConfig: typeof loadConfig;
+  getRuntimeConfig: typeof getRuntimeConfig;
+  loadSubagentRegistryRuntime: typeof loadSubagentRegistryRuntime;
 };
 
 const defaultSubagentAnnounceDeps: SubagentAnnounceDeps = {
   callGateway,
-  loadConfig,
+  getRuntimeConfig,
+  loadSubagentRegistryRuntime,
 };
 
 let subagentAnnounceDeps: SubagentAnnounceDeps = defaultSubagentAnnounceDeps;
@@ -125,6 +134,27 @@ function isWakeContinuationRun(runId: string): boolean {
   return stripWakeRunSuffixes(trimmed) !== trimmed;
 }
 
+function stripAndClassifyReply(text: string): string | null {
+  let result = text;
+  let didStrip = false;
+  const hasLeadingSilentToken = startsWithSilentToken(result, SILENT_REPLY_TOKEN);
+  if (hasLeadingSilentToken) {
+    result = stripLeadingSilentToken(result, SILENT_REPLY_TOKEN);
+    didStrip = true;
+  }
+  if (hasLeadingSilentToken || result.toLowerCase().includes(SILENT_REPLY_TOKEN.toLowerCase())) {
+    result = stripSilentToken(result, SILENT_REPLY_TOKEN);
+    didStrip = true;
+  }
+  if (
+    didStrip &&
+    (!result.trim() || isSilentReplyText(result, SILENT_REPLY_TOKEN) || isAnnounceSkip(result))
+  ) {
+    return null;
+  }
+  return result;
+}
+
 async function wakeSubagentRunAfterDescendants(params: {
   runId: string;
   childSessionKey: string;
@@ -142,7 +172,7 @@ async function wakeSubagentRunAfterDescendants(params: {
     return false;
   }
 
-  const cfg = subagentAnnounceDeps.loadConfig();
+  const cfg = subagentAnnounceDeps.getRuntimeConfig();
   const announceTimeoutMs = resolveSubagentAnnounceTimeoutMs(cfg);
   const wakeMessage = buildDescendantWakeMessage({
     findings: params.findings,
@@ -215,6 +245,7 @@ export async function runSubagentAnnounceFlow(params: {
   wakeOnDescendantSettle?: boolean;
   signal?: AbortSignal;
   bestEffortDeliver?: boolean;
+  onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void;
 }): Promise<boolean> {
   let didAnnounce = false;
   const expectsCompletionMessage = params.expectsCompletionMessage === true;
@@ -256,7 +287,12 @@ export async function runSubagentAnnounceFlow(params: {
     if (!outcome) {
       outcome = { status: "unknown" };
     }
-
+    const failedTerminalOutcome = outcome.status === "error";
+    const allowFailedOutputCapture =
+      !failedTerminalOutcome || (!params.roundOneReply && !params.fallbackReply);
+    if (failedTerminalOutcome) {
+      reply = undefined;
+    }
     let requesterDepth = getSubagentDepthFromSessionStore(targetRequesterSessionKey);
     const requesterIsInternalSession = () =>
       requesterDepth >= 1 || isCronSessionKey(targetRequesterSessionKey);
@@ -266,7 +302,7 @@ export async function runSubagentAnnounceFlow(params: {
       | Awaited<ReturnType<typeof loadSubagentRegistryRuntime>>
       | undefined;
     try {
-      subagentRegistryRuntime = await loadSubagentRegistryRuntime();
+      subagentRegistryRuntime = await subagentAnnounceDeps.loadSubagentRegistryRuntime();
       if (
         requesterDepth >= 1 &&
         subagentRegistryRuntime.shouldIgnorePostCompletionAnnounceForSession(
@@ -338,16 +374,18 @@ export async function runSubagentAnnounceFlow(params: {
     }
 
     if (!childCompletionFindings) {
-      const fallbackReply = normalizeOptionalString(params.fallbackReply);
+      const fallbackReply = failedTerminalOutcome
+        ? undefined
+        : normalizeOptionalString(params.fallbackReply);
       const fallbackIsSilent =
         Boolean(fallbackReply) &&
         (isAnnounceSkip(fallbackReply) || isSilentReplyText(fallbackReply, SILENT_REPLY_TOKEN));
 
-      if (!reply) {
+      if (!reply && allowFailedOutputCapture) {
         reply = await readSubagentOutput(params.childSessionKey, outcome);
       }
 
-      if (!reply?.trim()) {
+      if (!reply?.trim() && allowFailedOutputCapture) {
         reply = await readLatestSubagentOutputWithRetry({
           sessionKey: params.childSessionKey,
           maxWaitMs: params.timeoutMs,
@@ -383,9 +421,28 @@ export async function runSubagentAnnounceFlow(params: {
 
       if (isAnnounceSkip(reply) || isSilentReplyText(reply, SILENT_REPLY_TOKEN)) {
         if (fallbackReply && !fallbackIsSilent) {
-          reply = fallbackReply;
+          const cleaned = stripAndClassifyReply(fallbackReply);
+          if (cleaned === null) {
+            return true;
+          }
+          reply = cleaned;
         } else {
           return true;
+        }
+      } else if (reply) {
+        const cleaned = stripAndClassifyReply(reply);
+        if (cleaned === null) {
+          if (fallbackReply && !fallbackIsSilent) {
+            const cleanedFallback = stripAndClassifyReply(fallbackReply);
+            if (cleanedFallback === null) {
+              return true;
+            }
+            reply = cleanedFallback;
+          } else {
+            return true;
+          }
+        } else {
+          reply = cleaned;
         }
       }
     }
@@ -507,6 +564,7 @@ export async function runSubagentAnnounceFlow(params: {
       directIdempotencyKey,
       signal: params.signal,
     });
+    params.onDeliveryResult?.(delivery);
     didAnnounce = delivery.delivered;
     if (!delivery.delivered && delivery.path === "direct" && delivery.error) {
       defaultRuntime.error?.(

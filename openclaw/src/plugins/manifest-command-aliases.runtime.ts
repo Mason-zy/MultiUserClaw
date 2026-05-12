@@ -1,23 +1,25 @@
-import type { OpenClawConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   resolveManifestCommandAliasOwnerInRegistry,
+  type PluginManifestCommandAliasRegistry,
   type PluginManifestCommandAliasRecord,
 } from "./manifest-command-aliases.js";
-import { loadPluginManifestRegistry, type PluginManifestRegistry } from "./manifest-registry.js";
+import { loadPluginManifestRegistryForPluginRegistry } from "./plugin-registry.js";
 
 export function resolveManifestCommandAliasOwner(params: {
   command: string | undefined;
   config?: OpenClawConfig;
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
-  registry?: PluginManifestRegistry;
+  registry?: PluginManifestCommandAliasRegistry;
 }): PluginManifestCommandAliasRecord | undefined {
   const registry =
     params.registry ??
-    loadPluginManifestRegistry({
+    loadPluginManifestRegistryForPluginRegistry({
       config: params.config,
       workspaceDir: params.workspaceDir,
       env: params.env,
+      includeDisabled: true,
     });
   return resolveManifestCommandAliasOwnerInRegistry({
     command: params.command,

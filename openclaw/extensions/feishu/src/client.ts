@@ -1,16 +1,24 @@
 import type { Agent } from "node:https";
 import { createRequire } from "node:module";
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { resolveAmbientNodeProxyAgent } from "openclaw/plugin-sdk/extension-shared";
+import {
+  readPluginPackageVersion,
+  resolveAmbientNodeProxyAgent,
+} from "openclaw/plugin-sdk/extension-shared";
 import type { FeishuConfig, FeishuDomain, ResolvedFeishuAccount } from "./types.js";
 
 const require = createRequire(import.meta.url);
-const { version: pluginVersion } = require("../package.json") as { version: string };
+const pluginVersion = readPluginPackageVersion({ require });
 
 export { pluginVersion };
 
 const FEISHU_USER_AGENT = `openclaw-feishu-builtin/${pluginVersion}/${process.platform}`;
 export { FEISHU_USER_AGENT };
+
+const FEISHU_WS_CONFIG = {
+  PingInterval: 30,
+  PingTimeout: 3,
+} as const;
 
 /** User-Agent header value for all Feishu API requests. */
 export function getFeishuUserAgent(): string {
@@ -229,7 +237,10 @@ export async function createFeishuWSClient(account: ResolvedFeishuAccount): Prom
     appSecret,
     domain: resolveDomain(domain),
     loggerLevel: feishuClientSdk.LoggerLevel.info,
+    wsConfig: FEISHU_WS_CONFIG,
     ...(agent ? { agent } : {}),
+  } as ConstructorParameters<typeof feishuClientSdk.WSClient>[0] & {
+    wsConfig: typeof FEISHU_WS_CONFIG;
   });
 }
 
