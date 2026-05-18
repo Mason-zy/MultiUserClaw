@@ -1,6 +1,6 @@
-# OpenClaw Platform
+# Hermes Platform
 
-OpenClaw Platform 是一个基于 FastAPI 的多租户网关服务，用于管理用户、配额和 runtime 容器。当前默认 runtime backend 是 Hermes Agent，同时保留 OpenClaw-compatible API 路径和 OpenClaw fallback 配置。
+Hermes Platform 是一个基于 FastAPI 的多租户网关服务，用于管理用户、配额和 runtime 容器。当前默认 runtime backend 是 Hermes Agent，同时保留 OpenClaw-compatible API 路径和 OpenClaw fallback 配置。
 
 ## 功能特性
 

@@ -1,8 +1,8 @@
 #!/bin/bash
-# Docker entrypoint: bootstrap config files into the mounted volume, then run hermes.
+# Docker/Podman entrypoint: bootstrap config files into the mounted volume, then run hermes.
 set -e
 
-HERMES_HOME="/opt/data"
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
 
 sync_nanobot_packaged_skills() {
@@ -29,12 +29,69 @@ sync_nanobot_packaged_skills() {
             chown -R hermes:hermes "$skill_dst"
         fi
     done < <(find "$src_skills" -mindepth 1 -maxdepth 1 -type d -print0)
+
+    if [ "$(id -u)" = "0" ] && [ -d "$dst_skills" ]; then
+        chown -R hermes:hermes "$dst_skills"
+    fi
     export NANOBOT_PACKAGED_SKILLS_SYNCED=1
 }
 
+sync_nanobot_packaged_agents() {
+    if [ "${NANOBOT_PACKAGED_AGENTS_SYNCED:-}" = "1" ]; then
+        return 0
+    fi
+
+    local src_agents="$INSTALL_DIR/deploy_copy/Agents"
+    local dst_profiles="$HERMES_HOME/profiles"
+    if [ ! -d "$src_agents" ]; then
+        return 0
+    fi
+
+    mkdir -p "$dst_profiles"
+    echo "Syncing Nanobot packaged agents into $dst_profiles"
+    while IFS= read -r -d '' agent_src; do
+        local agent_name
+        local profile_dir
+        agent_name="$(basename "$agent_src")"
+        profile_dir="$dst_profiles/$agent_name"
+
+        if [ -d "$profile_dir" ]; then
+            echo "  Profile '$agent_name' already exists, skipping"
+            continue
+        fi
+
+        echo "  Creating profile: $agent_name"
+        mkdir -p "$profile_dir"/{memories,sessions,skills,skins,logs,plans,workspace,cron,home}
+
+        if [ -f "$agent_src/SOUL.md" ]; then
+            cp -a "$agent_src/SOUL.md" "$profile_dir/SOUL.md"
+        fi
+
+        for f in IDENTITY.md USER.md AGENTS.md; do
+            if [ -f "$agent_src/$f" ]; then
+                cp -a "$agent_src/$f" "$profile_dir/workspace/$f"
+            fi
+        done
+
+        if [ -f "$agent_src/USER.md" ]; then
+            cp -a "$agent_src/USER.md" "$profile_dir/memories/USER.md"
+        fi
+
+        if [ "$(id -u)" = "0" ]; then
+            chown -R hermes:hermes "$profile_dir"
+        fi
+    done < <(find "$src_agents" -mindepth 1 -maxdepth 1 -type d -print0)
+
+    if [ "$(id -u)" = "0" ] && [ -d "$dst_profiles" ]; then
+        chown -R hermes:hermes "$dst_profiles"
+    fi
+    export NANOBOT_PACKAGED_AGENTS_SYNCED=1
+}
+
 # --- Privilege dropping via gosu ---
-# When started as root (the default), optionally remap the hermes user/group
-# to match host-side ownership, fix volume permissions, then re-exec as hermes.
+# When started as root (the default for Docker, or fakeroot in rootless Podman),
+# optionally remap the hermes user/group to match host-side ownership, fix volume
+# permissions, then re-exec as hermes.
 if [ "$(id -u)" = "0" ]; then
     if [ -n "$HERMES_UID" ] && [ "$HERMES_UID" != "$(id -u hermes)" ]; then
         echo "Changing hermes UID to $HERMES_UID"
@@ -43,7 +100,9 @@ if [ "$(id -u)" = "0" ]; then
 
     if [ -n "$HERMES_GID" ] && [ "$HERMES_GID" != "$(id -g hermes)" ]; then
         echo "Changing hermes GID to $HERMES_GID"
-        groupmod -g "$HERMES_GID" hermes
+        # -o allows non-unique GID (e.g. macOS GID 20 "staff" may already exist
+        # as "dialout" in the Debian-based container image)
+        groupmod -o -g "$HERMES_GID" hermes 2>/dev/null || true
     fi
 
     mkdir -p "$HERMES_HOME"
@@ -51,20 +110,39 @@ if [ "$(id -u)" = "0" ]; then
         ln -sf /usr/bin/python3 /usr/local/bin/python
     fi
     sync_nanobot_packaged_skills
+    sync_nanobot_packaged_agents
 
+    # Fix ownership of the data volume. When HERMES_UID remaps the hermes user,
+    # files created by previous runs (under the old UID) become inaccessible.
+    # Always chown -R when UID was remapped; otherwise only if top-level is wrong.
     actual_hermes_uid=$(id -u hermes)
-    actual_hermes_gid=$(id -g hermes)
-    if [ "$(stat -c %u "$HERMES_HOME" 2>/dev/null)" != "$actual_hermes_uid" ]; then
-        echo "$HERMES_HOME is not owned by $actual_hermes_uid, fixing"
-        chown hermes:hermes "$HERMES_HOME"
+    needs_chown=false
+    if [ -n "$HERMES_UID" ] && [ "$HERMES_UID" != "10000" ]; then
+        needs_chown=true
+    elif [ "$(stat -c %u "$HERMES_HOME" 2>/dev/null)" != "$actual_hermes_uid" ]; then
+        needs_chown=true
+    fi
+    if [ "$needs_chown" = true ]; then
+        echo "Fixing ownership of $HERMES_HOME to hermes ($actual_hermes_uid)"
+        # In rootless Podman the container's "root" is mapped to an unprivileged
+        # host UID — chown will fail.  That's fine: the volume is already owned
+        # by the mapped user on the host side.
+        chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || \
+            echo "Warning: chown failed (rootless container?) — continuing anyway"
+        # The .venv must also be re-chowned when UID is remapped, otherwise
+        # lazy_deps.py cannot install platform packages (discord.py, etc.).
+        chown -R hermes:hermes "$INSTALL_DIR/.venv" 2>/dev/null || \
+            echo "Warning: chown .venv failed (rootless container?) — continuing anyway"
     fi
 
-    for managed_file in "$HERMES_HOME/.env" "$HERMES_HOME/config.yaml" "$HERMES_HOME/SOUL.md"; do
-        if [ -e "$managed_file" ] && [ "$(stat -c %u "$managed_file" 2>/dev/null)" != "$actual_hermes_uid" ]; then
-            echo "$managed_file is not owned by $actual_hermes_uid:$actual_hermes_gid, fixing"
-            chown hermes:hermes "$managed_file"
-        fi
-    done
+    # Ensure config.yaml is readable by the hermes runtime user even if it was
+    # edited on the host after initial ownership setup. Must run here (as root)
+    # rather than after the gosu drop, otherwise a non-root caller like
+    # `docker run -u $(id -u):$(id -g)` hits "Operation not permitted" (#15865).
+    if [ -f "$HERMES_HOME/config.yaml" ]; then
+        chown hermes:hermes "$HERMES_HOME/config.yaml" 2>/dev/null || true
+        chmod 640 "$HERMES_HOME/config.yaml" 2>/dev/null || true
+    fi
 
     echo "Dropping root privileges"
     exec gosu hermes "$0" "$@"
@@ -84,6 +162,7 @@ export PYTHONPATH="$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}"
 # ephemeral and shared across profiles.  See issue #4426.
 mkdir -p "$HERMES_HOME"/{cron,sessions,logs,hooks,memories,skills,skins,plans,workspace,home}
 sync_nanobot_packaged_skills
+sync_nanobot_packaged_agents
 
 # .env
 if [ ! -f "$HERMES_HOME/.env" ]; then
@@ -208,12 +287,42 @@ if [ ! -f "$HERMES_HOME/SOUL.md" ]; then
 fi
 chmod 644 "$HERMES_HOME/SOUL.md"
 
+# auth.json: bootstrap from env on first boot only.  Used by orchestrators
+# that need to seed the OAuth refresh credential non-interactively.
+if [ ! -f "$HERMES_HOME/auth.json" ] && [ -n "$HERMES_AUTH_JSON_BOOTSTRAP" ]; then
+    printf '%s' "$HERMES_AUTH_JSON_BOOTSTRAP" > "$HERMES_HOME/auth.json"
+    chmod 600 "$HERMES_HOME/auth.json"
+fi
+
 # Sync bundled skills (manifest-based so user edits are preserved)
 if [ -d "$INSTALL_DIR/skills" ]; then
     "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py"
 fi
 
+# Optionally start `hermes dashboard` as a side-process.
+case "${HERMES_DASHBOARD:-}" in
+    1|true|TRUE|True|yes|YES|Yes)
+        dash_host="${HERMES_DASHBOARD_HOST:-0.0.0.0}"
+        dash_port="${HERMES_DASHBOARD_PORT:-9119}"
+        dash_args=(--host "$dash_host" --port "$dash_port" --no-open)
+        if [ "$dash_host" != "127.0.0.1" ] && [ "$dash_host" != "localhost" ]; then
+            dash_args+=(--insecure)
+        fi
+        echo "Starting hermes dashboard on ${dash_host}:${dash_port} (background)"
+        (
+            stdbuf -oL -eL "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/nanobot_hermes.py" dashboard "${dash_args[@]}" 2>&1 \
+                | sed -u 's/^/[dashboard] /'
+        ) &
+        ;;
+esac
+
 # Avoid relying on editable-install console-script metadata at runtime.
 # Launch through the Nanobot wrapper so compatibility overlays are installed
 # before Hermes dispatches subcommands such as "gateway run".
+case "${1:-}" in
+    bash|sh|sleep|tail|python|python3|node|npm|uv)
+        exec "$@"
+        ;;
+esac
+
 exec "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/nanobot_hermes.py" "$@"

@@ -12,7 +12,7 @@ from sqlalchemy import cast, Date, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import write_audit_log
 from app.auth.dependencies import require_admin
-from app.auth.service import hash_password
+from app.auth.service import get_user_by_email, get_user_by_username, hash_password
 from app.container.manager import destroy_container, pause_container, resume_container
 from app.db.engine import get_db
 from app.db.models import AuditLog, Container, SharedAgentBinding, UsageRecord, User
@@ -49,6 +49,15 @@ class UpdateUserRequest(BaseModel):
     quota_tier: str | None = None
     runtime_mode: str | None = None
     is_active: bool | None = None
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    role: str = "user"
+    quota_tier: str = "free"
+    runtime_mode: str = "dedicated"
 
 
 class ResetPasswordRequest(BaseModel):
@@ -182,6 +191,53 @@ async def list_users(
     ]
 
     return PaginatedUsers(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.post("/users")
+async def create_user_handler(
+    req: CreateUserRequest,
+    db: AsyncSession = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+):
+    # Validate
+    if not req.username.strip():
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not req.email.strip():
+        raise HTTPException(status_code=400, detail="Email is required")
+    if len(req.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if req.role not in {"user", "admin"}:
+        raise HTTPException(status_code=400, detail="role must be user or admin")
+    if req.quota_tier not in {"free", "basic", "pro"}:
+        raise HTTPException(status_code=400, detail="quota_tier must be free, basic, or pro")
+    if req.runtime_mode not in {"dedicated", "shared"}:
+        raise HTTPException(status_code=400, detail="runtime_mode must be dedicated or shared")
+
+    # Check uniqueness
+    if await get_user_by_username(db, req.username.strip()):
+        raise HTTPException(status_code=409, detail="Username already exists")
+    if await get_user_by_email(db, req.email.strip()):
+        raise HTTPException(status_code=409, detail="Email already exists")
+
+    user = User(
+        username=req.username.strip(),
+        email=req.email.strip(),
+        password_hash=hash_password(req.password),
+        role=req.role,
+        quota_tier=req.quota_tier,
+        runtime_mode=req.runtime_mode,
+    )
+    db.add(user)
+    await write_audit_log(
+        db,
+        action="user_create",
+        user_id=admin_user.id,
+        resource=user.id,
+        detail={"username": user.username, "email": user.email, "role": user.role, "by_admin": admin_user.username},
+    )
+    await db.commit()
+    await db.refresh(user)
+    return {"ok": True, "user_id": user.id}
 
 
 @router.put("/users/{user_id}")

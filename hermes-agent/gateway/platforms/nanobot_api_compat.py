@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -28,6 +30,14 @@ SESSION_ROUTES = (
     ("GET", "/api/hermes/events/stream", "_handle_events_stream"),
 )
 
+_SESSION_AGENT_RE = re.compile(r"^agent:([^:]+):")
+_PROFILE_PROMPT_FILES = (
+    "SOUL.md",
+    "workspace/IDENTITY.md",
+    "workspace/USER.md",
+    "workspace/AGENTS.md",
+)
+
 
 def _openai_error(
     message: str,
@@ -41,6 +51,56 @@ def _openai_error(
             "code": code,
         }
     }
+
+
+def _agent_id_from_session_key(session_key: str | None) -> str | None:
+    if not session_key:
+        return None
+    match = _SESSION_AGENT_RE.match(str(session_key))
+    if not match:
+        return None
+    agent_id = match.group(1).strip()
+    return agent_id or None
+
+
+def _profiles_root() -> Path:
+    try:
+        from hermes_constants import get_default_hermes_root
+        return get_default_hermes_root() / "profiles"
+    except Exception:
+        try:
+            from hermes_constants import get_hermes_home
+            return get_hermes_home() / "profiles"
+        except Exception:
+            return Path.home() / ".hermes" / "profiles"
+
+
+def _profile_prompt_from_session_key(session_key: str | None) -> str | None:
+    agent_id = _agent_id_from_session_key(session_key)
+    if not agent_id:
+        return None
+
+    profile_dir = _profiles_root() / agent_id
+    if not profile_dir.is_dir():
+        return None
+
+    parts: list[str] = []
+    for rel_path in _PROFILE_PROMPT_FILES:
+        path = profile_dir / rel_path
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            parts.append(f"# {rel_path}\n{text}")
+
+    if not parts:
+        return None
+    return (
+        "以下内容来自当前 Hermes profile。请把它作为本次会话的 Agent 身份、"
+        "任务边界和工作区约束。\n\n"
+        + "\n\n".join(parts)
+    )
 
 
 def _route_key(route: Any) -> tuple[str, str] | None:
@@ -361,6 +421,21 @@ def install() -> None:
     adapter_cls._handle_rename_session = _handle_rename_session
     adapter_cls._handle_delete_session = _handle_delete_session
     adapter_cls._handle_events_stream = _handle_events_stream
+
+    original_create_agent = adapter_cls._create_agent
+
+    def create_agent_with_profile_prompt(self, *args: Any, **kwargs: Any):
+        profile_prompt = _profile_prompt_from_session_key(kwargs.get("gateway_session_key"))
+        if profile_prompt:
+            existing_prompt = kwargs.get("ephemeral_system_prompt")
+            kwargs["ephemeral_system_prompt"] = (
+                f"{profile_prompt}\n\n# 请求附加 instructions\n{existing_prompt}"
+                if existing_prompt
+                else profile_prompt
+            )
+        return original_create_agent(self, *args, **kwargs)
+
+    adapter_cls._create_agent = create_agent_with_profile_prompt
 
     original_set_run_status = adapter_cls._set_run_status
 

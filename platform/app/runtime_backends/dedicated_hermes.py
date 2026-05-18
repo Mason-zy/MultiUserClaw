@@ -20,6 +20,7 @@ from app.runtime_backends.hermes_files import (
     DEFAULT_HERMES_UPLOAD_DIR,
     write_upload_to_hermes_container,
 )
+from app.runtime_backends.hermes_agents import build_agent_info, model_for_session_key
 from app.runtime_backends.hermes_run import (
     HermesEventSanitizer,
     HermesRunTimingTracker,
@@ -155,20 +156,11 @@ class DedicatedHermesBackend:
     async def get_agent_info(self, ctx: RuntimeContext) -> dict:
         payload = await (await self._client(ctx)).get_models()
         models = payload.get("data") if isinstance(payload, dict) else []
-        agents = models if isinstance(models, list) else []
-        default_id = ""
-        for item in agents:
-            if isinstance(item, dict) and item.get("id"):
-                default_id = str(item["id"])
-                break
-        default_id = default_id or "hermes-agent"
-        return {
-            "agents": agents,
-            "defaultId": default_id,
-            "mainKey": f"agent:{default_id}",
-            "scope": ctx.scope,
-            "runtime_mode": ctx.user.runtime_mode,
-        }
+        return build_agent_info(
+            models if isinstance(models, list) else [],
+            scope=ctx.scope,
+            runtime_mode=ctx.user.runtime_mode,
+        )
 
     async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
         async with async_session() as db:
@@ -200,7 +192,12 @@ class DedicatedHermesBackend:
 
     async def send_message(self, ctx: RuntimeContext, session_key: str, message: str) -> dict:
         started_at = time.perf_counter()
-        payload = await (await self._client(ctx)).create_run(message=message, session_id=session_key or None)
+        payload = await (await self._client(ctx)).create_run(
+            message=message,
+            session_id=session_key or None,
+            session_key=session_key or None,
+            model=model_for_session_key(session_key),
+        )
         run_id = payload.get("run_id") if isinstance(payload, dict) else None
         effective_session_key = payload.get("session_id") if isinstance(payload, dict) else None
         logger.info(
