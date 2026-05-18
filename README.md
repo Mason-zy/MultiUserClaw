@@ -9,10 +9,9 @@
 
 ## 📌 版本分支说明
 
-- **main 分支**：当前主分支，基于 OpenClaw 2026.4.10
-- **simple_web 分支**：简单的单用户 Web 界面，适合单用户测试
+- **main 分支**：当前主分支，基于hermes，因为hermes比openclaw快很多，所以全面切换为hermes分支
+- **openclaw 分支**：当前主分支，基于 OpenClaw 2026.5.10
 - **nanobot014v3 分支**：nanobot 的 0.1.4 post v3 版本
-- **openclaw_oldfrontend 分支**：基于 OpenClaw 2026.3.3 (eae1484) 的旧版本前端
 
 ---
 
