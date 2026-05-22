@@ -82,6 +82,8 @@ export interface Skill {
   description: string
   source?: string
   disabled?: boolean
+  path?: string
+  installed?: Skill[]
 }
 
 export interface SlashCommandInfo {

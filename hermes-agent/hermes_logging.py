@@ -25,6 +25,7 @@ Session context:
 
 import logging
 import os
+import sys
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -243,6 +244,13 @@ def setup_logging(
             formatter=RedactingFormatter(_LOG_FORMAT),
             log_filter=_ComponentFilter(COMPONENT_PREFIXES["gateway"]),
         )
+
+    if not any(isinstance(h, logging.StreamHandler) and h.stream is sys.stderr
+               for h in root.handlers):
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(level)
+        console.setFormatter(RedactingFormatter(_LOG_FORMAT))
+        root.addHandler(console)
 
     if _logging_initialized and not force:
         return log_dir

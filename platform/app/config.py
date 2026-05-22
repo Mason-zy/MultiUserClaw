@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     # Platform gateway
     host: str = "0.0.0.0"
     port: int = 8080
+    log_level: str = "INFO"
 
     # Public-facing base URL (used to generate external access URLs in port mapping)
     public_base_url: str = "http://openclaw.infox-med.com"
@@ -104,6 +105,13 @@ class Settings(BaseSettings):
 
     # Local dev: OpenClaw Gateway WS URL for direct WS proxy (e.g. "ws://127.0.0.1:18789")
     dev_gateway_url: str = ""
+
+    # Local training trace capture, disabled by default.
+    training_trace_enabled: bool = False
+    training_trace_ingest_enabled: bool = False
+    training_trace_ingest_token: str = ""
+    training_trace_dir: str = ".hermes/training_traces"
+    training_trace_hash_salt: str = ""
 
     model_config = {"env_prefix": "PLATFORM_"}
 

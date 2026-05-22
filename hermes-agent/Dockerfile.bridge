@@ -12,7 +12,13 @@ ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 
 # Use domestic mirror for apt (for any additional system packages)
 RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources && \
-    sed -i 's|http://security.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
+    sed -i 's|http://security.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
+        libffi-dev shared-mime-info chromium python3-pip && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip3 install --break-system-packages requests
 
 WORKDIR /opt/hermes
 RUN npm config set fetch-retries 5 && \
@@ -36,7 +42,7 @@ COPY --chown=hermes:hermes batch_runner.py cli.py hermes_constants.py hermes_log
 RUN chown -R hermes:hermes /opt/hermes
 USER hermes
 RUN if [ ! -d /opt/hermes/.venv ]; then uv venv --seed /opt/hermes/.venv; fi && \
-    uv pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple setuptools wheel && \
+    uv pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple setuptools wheel weasyprint && \
     uv pip install --no-build-isolation --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple --extra-index-url https://pypi.org/simple/ -e ".[all]"
 
 COPY --chown=hermes:hermes . /opt/hermes

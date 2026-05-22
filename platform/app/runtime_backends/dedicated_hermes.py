@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -18,6 +19,7 @@ from app.hermes_client import HermesClient
 from app.runtime_backend import RuntimeContext
 from app.runtime_backends.hermes_files import (
     DEFAULT_HERMES_UPLOAD_DIR,
+    read_data_file_from_hermes_container,
     write_upload_to_hermes_container,
 )
 from app.runtime_backends.hermes_agents import build_agent_info, model_for_session_key
@@ -34,6 +36,72 @@ from app.runtime_backends.hermes_run import (
 from app.runtime_backends.hermes_skills import list_skills_from_hermes_container
 
 logger = logging.getLogger(__name__)
+
+LEGACY_OPENCLAW_SESSIONS_INDEX = "agents/main/sessions/sessions.json"
+
+
+def _is_generated_openclaw_session_key(session_key: str) -> bool:
+    return session_key.startswith("agent:") and ":session-" in session_key
+
+
+def _empty_openclaw_session(session_key: str) -> dict[str, Any]:
+    return {
+        "key": session_key,
+        "sessionKey": session_key,
+        "title": session_key.rsplit(":", 1)[-1] or session_key,
+        "messages": [],
+        "messageCount": 0,
+        "createdAt": None,
+        "updatedAt": None,
+        "runtime": "hermes",
+        "pending": True,
+    }
+
+
+def _legacy_ms_to_iso(value: Any) -> str | None:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _clean_legacy_openclaw_text(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("Sender (untrusted metadata):") and "\n\n[" in cleaned:
+        cleaned = "[" + cleaned.rsplit("\n\n[", 1)[1]
+    if cleaned.startswith("["):
+        close = cleaned.find("] ")
+        if 0 <= close < 120:
+            cleaned = cleaned[close + 2 :]
+    return cleaned.strip()
+
+
+def _legacy_openclaw_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return _clean_legacy_openclaw_text(content)
+    if not isinstance(content, list):
+        return ""
+    text_parts = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            text_parts.append(text)
+    return _clean_legacy_openclaw_text("\n".join(text_parts))
+
+
+def _legacy_openclaw_session_id(record: Any) -> str:
+    if not isinstance(record, dict):
+        return ""
+    session_id = record.get("sessionId")
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    session_file = record.get("sessionFile")
+    if isinstance(session_file, str) and session_file.endswith(".jsonl"):
+        return session_file.rsplit("/", 1)[-1].removesuffix(".jsonl")
+    return ""
 
 
 def _elapsed_ms(start: float) -> float:
@@ -153,6 +221,100 @@ class DedicatedHermesBackend:
             "messageCount": message_count if isinstance(message_count, int) else len(payload.get("messages") or []),
         }
 
+    async def _read_legacy_data_file(self, ctx: RuntimeContext, path: str) -> str:
+        async with async_session() as db:
+            container = await ensure_running(db, ctx.user.id)
+        data = read_data_file_from_hermes_container(container.docker_id, path)
+        return data.decode("utf-8")
+
+    async def _legacy_openclaw_session_index(self, ctx: RuntimeContext) -> dict[str, Any]:
+        try:
+            raw = await self._read_legacy_data_file(ctx, LEGACY_OPENCLAW_SESSIONS_INDEX)
+            payload = json.loads(raw)
+        except Exception as exc:
+            logger.debug("legacy_openclaw_sessions_unavailable user_id=%s error=%s", ctx.user.id, exc)
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _legacy_openclaw_session_summary(self, session_key: str, record: Any) -> dict[str, Any] | None:
+        if not isinstance(record, dict) or not _legacy_openclaw_session_id(record):
+            return None
+        updated_at = _legacy_ms_to_iso(record.get("updatedAt"))
+        created_at = _legacy_ms_to_iso(record.get("createdAt"))
+        return {
+            "key": session_key,
+            "sessionKey": session_key,
+            "title": str(record.get("title") or session_key),
+            "created_at": created_at,
+            "createdAt": created_at,
+            "updated_at": updated_at,
+            "updatedAt": updated_at,
+            "messageCount": record.get("messageCount") if isinstance(record.get("messageCount"), int) else None,
+            "runtime": "legacy-openclaw",
+            "readonly": True,
+        }
+
+    def _legacy_openclaw_messages_from_jsonl(self, raw: str) -> tuple[list[dict[str, Any]], str | None]:
+        messages = []
+        created_at = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            timestamp = event.get("timestamp")
+            if created_at is None:
+                created_at = _legacy_ms_to_iso(timestamp)
+            if event.get("type") != "message":
+                continue
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").strip()
+            content = _legacy_openclaw_message_content(message.get("content"))
+            if role not in {"user", "assistant", "system", "tool"} or not content:
+                continue
+            messages.append(
+                {
+                    "role": role,
+                    "content": content,
+                    "timestamp": _legacy_ms_to_iso(message.get("timestamp")) or _legacy_ms_to_iso(timestamp),
+                }
+            )
+        return messages, created_at
+
+    async def _legacy_openclaw_session(self, ctx: RuntimeContext, session_key: str) -> dict[str, Any] | None:
+        index = await self._legacy_openclaw_session_index(ctx)
+        record = index.get(session_key)
+        session_id = _legacy_openclaw_session_id(record)
+        if not session_id:
+            return None
+        try:
+            raw = await self._read_legacy_data_file(ctx, f"agents/main/sessions/{session_id}.jsonl")
+        except Exception as exc:
+            logger.debug("legacy_openclaw_session_file_unavailable user_id=%s session_key=%s error=%s", ctx.user.id, session_key, exc)
+            raw = ""
+        messages, created_at = self._legacy_openclaw_messages_from_jsonl(raw)
+        updated_at = _legacy_ms_to_iso(record.get("updatedAt")) if isinstance(record, dict) else None
+        return {
+            "key": session_key,
+            "sessionKey": session_key,
+            "title": str(record.get("title") or session_key) if isinstance(record, dict) else session_key,
+            "messages": messages,
+            "messageCount": len(messages),
+            "created_at": created_at,
+            "createdAt": created_at,
+            "updated_at": updated_at,
+            "updatedAt": updated_at,
+            "runtime": "legacy-openclaw",
+            "readonly": True,
+        }
+
     async def get_agent_info(self, ctx: RuntimeContext) -> dict:
         payload = await (await self._client(ctx)).get_models()
         models = payload.get("data") if isinstance(payload, dict) else []
@@ -171,11 +333,30 @@ class DedicatedHermesBackend:
         payload = await self._request(ctx, "GET", "/api/hermes/sessions")
         sessions = payload.get("sessions") if isinstance(payload, dict) else []
         if not isinstance(sessions, list):
-            return []
-        return [self._session_summary(item) for item in sessions if isinstance(item, dict)]
+            sessions = []
+        summaries = [self._session_summary(item) for item in sessions if isinstance(item, dict)]
+        seen_keys = {str(item.get("key") or item.get("sessionKey") or "") for item in summaries}
+        legacy_index = await self._legacy_openclaw_session_index(ctx)
+        for session_key, record in legacy_index.items():
+            if not isinstance(session_key, str) or session_key in seen_keys:
+                continue
+            summary = self._legacy_openclaw_session_summary(session_key, record)
+            if summary is not None:
+                summaries.append(summary)
+        return summaries
 
     async def get_session(self, ctx: RuntimeContext, session_key: str):
-        payload = await self._session_record(ctx, session_key)
+        try:
+            payload = await self._session_record(ctx, session_key)
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_404_NOT_FOUND:
+                raise
+            legacy = await self._legacy_openclaw_session(ctx, session_key)
+            if legacy is not None:
+                return legacy
+            if _is_generated_openclaw_session_key(session_key):
+                return _empty_openclaw_session(session_key)
+            raise
         messages = payload.get("messages")
         if not isinstance(messages, list):
             messages = []
@@ -190,13 +371,55 @@ class DedicatedHermesBackend:
             "updatedAt": payload.get("updated_at") or payload.get("last_message_at") or payload.get("created_at"),
         }
 
+    def _conversation_history_from_messages(self, messages: list[Any]) -> list[dict[str, str]]:
+        history = []
+        for item in sanitize_hermes_messages(messages):
+            role = str(item.get("role") or "").strip()
+            content = item.get("content")
+            if role not in {"user", "assistant", "system"} or not isinstance(content, str):
+                continue
+            content = content.strip()
+            if not content:
+                continue
+            history.append({"role": role, "content": content})
+        return history
+
+    async def _conversation_history(self, ctx: RuntimeContext, session_key: str) -> list[dict[str, str]]:
+        if not session_key:
+            return []
+        try:
+            payload = await self._session_record(ctx, session_key)
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_404_NOT_FOUND:
+                logger.debug(
+                    "hermes_session_history_unavailable scope=%s user_id=%s session_key=%s status=%s",
+                    ctx.scope,
+                    ctx.user.id,
+                    session_key,
+                    exc.status_code,
+                )
+            return []
+        except Exception as exc:
+            logger.debug(
+                "hermes_session_history_unavailable scope=%s user_id=%s session_key=%s error=%s",
+                ctx.scope,
+                ctx.user.id,
+                session_key,
+                exc,
+            )
+            return []
+        messages = payload.get("messages") if isinstance(payload, dict) else []
+        return self._conversation_history_from_messages(messages if isinstance(messages, list) else [])
+
     async def send_message(self, ctx: RuntimeContext, session_key: str, message: str) -> dict:
         started_at = time.perf_counter()
+        conversation_history = await self._conversation_history(ctx, session_key)
         payload = await (await self._client(ctx)).create_run(
             message=message,
             session_id=session_key or None,
             session_key=session_key or None,
             model=model_for_session_key(session_key),
+            conversation_history=conversation_history,
         )
         run_id = payload.get("run_id") if isinstance(payload, dict) else None
         effective_session_key = payload.get("session_id") if isinstance(payload, dict) else None
@@ -258,6 +481,29 @@ class DedicatedHermesBackend:
         if isinstance(payload, dict):
             return payload
         return {"ok": True, "session_key": session_key}
+
+    async def abort_run(self, ctx: RuntimeContext, run_id: str, session_key: str = "") -> dict:
+        """Stop a running agent via POST /v1/runs/{run_id}/stop."""
+        try:
+            payload = await (await self._client(ctx)).request(
+                "POST", f"/v1/runs/{run_id}/stop", timeout=10.0,
+            )
+            return {
+                "ok": True,
+                "aborted": True,
+                "runIds": [run_id],
+            }
+        except Exception as exc:
+            logger.warning("abort_run failed run_id=%s: %s", run_id, exc)
+            return {"ok": False, "aborted": False, "runIds": []}
+
+    async def abort_active_session(self, ctx: RuntimeContext, session_key: str) -> dict:
+        """Best-effort abort: no direct hermes API for session-level abort."""
+        return {"ok": True, "aborted": False, "runIds": []}
+
+    async def list_commands(self, ctx: RuntimeContext, agent_id: str = "") -> dict:
+        """Hermes does not expose a slash commands API — return empty."""
+        return {"agentId": agent_id or "innovation", "commands": []}
 
     async def upload_file(
         self,
@@ -332,12 +578,15 @@ class DedicatedHermesBackend:
         stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
         base_url = await self._resolve_base_url(stream_ctx)
         target_url = f"{base_url}/api/hermes/events/stream"
+        headers = {}
+        if settings.dedicated_hermes_api_key:
+            headers["Authorization"] = f"Bearer {settings.dedicated_hermes_api_key}"
 
         async def _stream_sse():
             sanitizer = HermesEventSanitizer()
             async with httpx.AsyncClient(timeout=None) as client:
                 try:
-                    async with client.stream("GET", target_url) as resp:
+                    async with client.stream("GET", target_url, headers=headers) as resp:
                         if resp.status_code >= 400:
                             yield b'data: {"error":"dedicated hermes upstream error"}\n\n'
                             return

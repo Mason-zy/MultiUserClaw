@@ -6,6 +6,7 @@ forwarded to their individual Docker container.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -29,10 +30,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.config import settings
-from app.container.manager import ensure_running, get_container
+from app.container.manager import ensure_running, get_container, get_docker_container
 from app.db.engine import async_session, get_db
 from app.db.models import User
-from app.runtime_backends.hermes_files import read_file_from_hermes_container
+from app.runtime_backends.hermes_files import normalize_hermes_filemanager_path, read_file_from_hermes_container
 
 logger = logging.getLogger("platform.routes.proxy")
 router = APIRouter(prefix="/api/openclaw", tags=["proxy"])
@@ -185,9 +186,21 @@ async def _proxy_hermes_models(base_url: str) -> JSONResponse:
 async def _proxy_hermes_status(base_url: str) -> JSONResponse:
     response = await _hermes_request("GET", base_url, "/health")
     payload = _safe_json_payload(response)
+    connected = response.status_code < 400 and (
+        not isinstance(payload, dict)
+        or str(payload.get("status") or "").lower() in {"", "ok", "healthy", "ready"}
+    )
     return JSONResponse(
         status_code=response.status_code,
-        content={"ok": response.status_code < 400, "runtime": "hermes", "upstream": payload},
+        content={
+            "ok": response.status_code < 400,
+            "gateway_connected": connected,
+            "config_path": "platform://hermes",
+            "workspace": "/workspace",
+            "model": settings.default_model,
+            "runtime": "hermes",
+            "upstream": payload,
+        },
     )
 
 
@@ -304,6 +317,29 @@ def _hermes_empty_compat(path: str, request: Request) -> JSONResponse | None:
         return JSONResponse({"repo": "", "repoName": "", "skills": [], "cacheKey": "", "runtime": "hermes"})
     if path == "settings/gateway/restart" and request.method == "POST":
         return JSONResponse({"success": False, "message": "Hermes runtime restart is managed by the platform container lifecycle"})
+    if path == "settings/config" and request.method == "GET":
+        return JSONResponse(
+            {
+                "config": {
+                    "gateway": {
+                        "bind": "platform",
+                        "port": int(getattr(settings, "port", 8080) or 8080),
+                        "controlUi": {"allowedOrigins": ["*"]},
+                    },
+                    "runtime": {"backend": "hermes"},
+                },
+                "runtime": "hermes",
+                "compatibility": "openclaw-readonly",
+            }
+        )
+    if path == "settings/config" and request.method == "PUT":
+        return JSONResponse(
+            {
+                "ok": False,
+                "runtime": "hermes",
+                "detail": "Hermes settings are managed by platform environment variables",
+            }
+        )
     if path == "models/config" and request.method == "PUT":
         return JSONResponse({"ok": False, "runtime": "hermes", "detail": "Hermes model config is controlled by platform environment variables"})
     if path == "filemanager/browse" and request.method == "GET":
@@ -557,17 +593,18 @@ async def _proxy_file_request(request: Request, token: str, bridge_path: str):
     runtime_backend = (settings.dedicated_runtime_backend or "openclaw").strip().lower()
     if runtime_backend == "hermes":
         requested_path = request.query_params.get("path", "")
-        normalized_path = requested_path if requested_path.startswith("/") else f"/{requested_path}" if requested_path else ""
-        if bridge_path == "filemanager/serve":
+        normalized_path = requested_path
+        if bridge_path == "filemanager/download" and requested_path and not requested_path.startswith("/"):
+            normalized_path = normalize_hermes_filemanager_path(requested_path)
+        if bridge_path in {"filemanager/serve", "filemanager/download"}:
             async with async_session() as db:
                 container = await ensure_running(db, user.id)
             content, media_type = read_file_from_hermes_container(container.docker_id, normalized_path)
             return Response(content=content, media_type=media_type)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Dedicated Hermes file proxy currently supports /workspace paths via filemanager/serve only",
-            )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dedicated Hermes file proxy only supports filemanager/serve and filemanager/download",
+        )
     else:
         async with async_session() as db:
             base_url = await _container_url(db, user)
@@ -770,6 +807,7 @@ async def proxy_terminal_websocket(
     """Forward WebSocket terminal stream to per-user bridge terminal endpoint."""
     from app.auth.service import decode_token, get_user_by_id
 
+    hermes_terminal_container_id = ""
     async with async_session() as db:
         payload = decode_token(token)
         if payload is None or payload.get("type") != "access":
@@ -781,12 +819,25 @@ async def proxy_terminal_websocket(
             await websocket.close(code=4001, reason="User not found")
             return
 
-        if settings.dev_openclaw_url:
-            target_ws_url = settings.dev_openclaw_url.replace("http://", "ws://").replace("https://", "wss://")
-            target_ws_url = target_ws_url.rstrip("/") + "/api/terminal/ws"
-        else:
+        if _dedicated_runtime_backend() == "hermes":
             container = await ensure_running(db, user.id)
-            target_ws_url = f"ws://{container.internal_host}:{container.internal_port}/api/terminal/ws"
+            container_id = container.docker_id or container.container_name
+            if not container_id:
+                await websocket.close(code=1013, reason="Hermes container is unavailable")
+                return
+            hermes_terminal_container_id = container_id
+
+        else:
+            if settings.dev_openclaw_url:
+                target_ws_url = settings.dev_openclaw_url.replace("http://", "ws://").replace("https://", "wss://")
+                target_ws_url = target_ws_url.rstrip("/") + "/api/terminal/ws"
+            else:
+                container = await ensure_running(db, user.id)
+                target_ws_url = f"ws://{container.internal_host}:{container.internal_port}/api/terminal/ws"
+
+    if hermes_terminal_container_id:
+        await _bridge_hermes_terminal_websocket(websocket, hermes_terminal_container_id)
+        return
 
     await websocket.accept()
 
@@ -835,6 +886,126 @@ async def proxy_terminal_websocket(
     except Exception as exc:
         logger.error("Terminal WebSocket 代理异常: %s", exc, exc_info=True)
     finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+def _terminal_command_from_init(raw: str) -> tuple[str, str]:
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return "bash -il", ""
+    if not isinstance(payload, dict) or payload.get("type") != "init":
+        return "bash -il", ""
+    command = str(payload.get("command") or "bash -il").strip() or "bash -il"
+    session_key = str(payload.get("session_key") or "")
+    return command, session_key
+
+
+def _terminal_socket_target(sock):
+    return getattr(sock, "_sock", sock)
+
+
+def _terminal_socket_recv(sock, size: int = 4096) -> bytes:
+    target = _terminal_socket_target(sock)
+    data = target.recv(size)
+    return data or b""
+
+
+def _terminal_socket_send(sock, data: bytes) -> None:
+    target = _terminal_socket_target(sock)
+    if hasattr(target, "sendall"):
+        target.sendall(data)
+    else:
+        target.send(data)
+
+
+def _terminal_socket_close(sock) -> None:
+    for target in (sock, _terminal_socket_target(sock)):
+        close = getattr(target, "close", None)
+        if close is None:
+            continue
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _start_hermes_terminal_socket(container_id_or_name: str, command: str):
+    container = get_docker_container(container_id_or_name)
+    result = container.exec_run(
+        ["sh", "-lc", command],
+        stdin=True,
+        stdout=True,
+        stderr=True,
+        tty=True,
+        socket=True,
+        workdir="/workspace",
+    )
+    return getattr(result, "output", result[1] if isinstance(result, tuple) else result)
+
+
+async def _bridge_hermes_terminal_websocket(websocket: WebSocket, container_id_or_name: str) -> None:
+    await websocket.accept()
+    terminal_socket = None
+    try:
+        init_raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        command, session_key = _terminal_command_from_init(init_raw)
+        terminal_socket = await asyncio.to_thread(_start_hermes_terminal_socket, container_id_or_name, command)
+        await websocket.send_text(json.dumps({"type": "session", "session_key": session_key, "reused": False}))
+        await websocket.send_text(json.dumps({"type": "started", "command": command}))
+
+        async def socket_to_client():
+            while True:
+                data = await asyncio.to_thread(_terminal_socket_recv, terminal_socket)
+                if not data:
+                    break
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "output",
+                            "data": data.decode("utf-8", errors="replace"),
+                        }
+                    )
+                )
+            await websocket.send_text(json.dumps({"type": "exit", "code": "", "signal": ""}))
+
+        async def client_to_socket():
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    payload = json.loads(raw)
+                except ValueError:
+                    await asyncio.to_thread(_terminal_socket_send, terminal_socket, raw.encode("utf-8"))
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("type") == "input":
+                    text = str(payload.get("data") or "")
+                    await asyncio.to_thread(_terminal_socket_send, terminal_socket, text.encode("utf-8"))
+
+        tasks = [asyncio.create_task(socket_to_client()), asyncio.create_task(client_to_socket())]
+        try:
+            _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+        finally:
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.TimeoutError:
+        await websocket.send_text(json.dumps({"type": "error", "message": "Terminal init message timed out"}))
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Hermes terminal bridge error: %s", exc, exc_info=True)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass
+    finally:
+        if terminal_socket is not None:
+            await asyncio.to_thread(_terminal_socket_close, terminal_socket)
         try:
             await websocket.close()
         except Exception:

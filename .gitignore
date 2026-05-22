@@ -59,6 +59,7 @@ cache
 .claude
 .claude/settings.local.json
 .hermes
+.qoder
 
 # Local planning and agent scratch docs. Use `git add -f docs/<path>` for shared docs.
 docs/
@@ -70,4 +71,4 @@ openclaw/packages/libsignal-node/
 phone_front/dist
 hermes-agent/deploy_copy
 openclaw
-.qoder
+platform/deploy_copy

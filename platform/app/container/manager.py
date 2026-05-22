@@ -136,6 +136,28 @@ def _runtime_environment(container_token: str, sso_token: str | None) -> dict[st
     return env
 
 
+def _container_config(container: docker.models.containers.Container) -> dict:
+    config = container.attrs.get("Config", {}) or {}
+    return config if isinstance(config, dict) else {}
+
+
+def _container_matches_runtime(container: docker.models.containers.Container) -> bool:
+    """Return whether an existing user container matches the configured runtime backend."""
+    config = _container_config(container)
+    env = set(config.get("Env") or [])
+    entrypoint = " ".join(str(part) for part in (config.get("Entrypoint") or []))
+    command = " ".join(str(part) for part in (config.get("Cmd") or []))
+
+    if _runtime_backend() == "hermes":
+        return (
+            "API_SERVER_ENABLED=true" in env
+            and "/opt/hermes/docker/entrypoint.sh" in entrypoint
+            and "gateway" in command
+        )
+
+    return "BRIDGE_ENABLE_CHANNELS=1" in env and "bridge/dist/bridge/start.js" in command
+
+
 def _runtime_published_ports() -> dict[str, tuple[str, int | None]]:
     if _runtime_backend() == "hermes":
         return {
@@ -337,6 +359,33 @@ def _write_runtime_metadata(container: docker.models.containers.Container, markd
         raise RuntimeError("failed to write platform-runtime.json into container workspace")
 
 
+def _repair_hermes_data_ownership(container: docker.models.containers.Container) -> None:
+    """Make files injected into the Hermes data volume writable by the hermes user."""
+    data_volume = ""
+    for mount in container.attrs.get("Mounts", []) or []:
+        if mount.get("Destination") == "/opt/data" and mount.get("Type") == "volume":
+            data_volume = str(mount.get("Name") or "").strip()
+            break
+
+    if data_volume:
+        _docker().containers.run(
+            image=_runtime_image(),
+            entrypoint="chown",
+            command=["-R", "hermes:hermes", "/opt/data"],
+            mounts=[docker.types.Mount("/opt/data", data_volume, type="volume")],
+            remove=True,
+        )
+        return
+
+    result = container.exec_run(["chown", "-R", "hermes:hermes", "/opt/data"], user="root")
+    exit_code = getattr(result, "exit_code", result[0] if isinstance(result, tuple) else 0)
+    if exit_code != 0:
+        output = getattr(result, "output", result[1] if isinstance(result, tuple) and len(result) > 1 else b"")
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        raise RuntimeError(f"failed to repair Hermes data ownership: {output}")
+
+
 def _write_hermes_runtime_files(container: docker.models.containers.Container) -> None:
     config_content = _build_hermes_config_yaml().encode("utf-8")
     env_content = _build_hermes_env_file().encode("utf-8")
@@ -358,6 +407,7 @@ def _write_hermes_runtime_files(container: docker.models.containers.Container) -
     ok = container.put_archive("/opt/data", tar_buffer.read())
     if not ok:
         raise RuntimeError("failed to write Hermes config.yaml/.env into container data volume")
+    _repair_hermes_data_ownership(container)
 
 
 def _build_expose_port_skill_markdown(
@@ -678,9 +728,27 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
 
     client = _docker()
 
+    async def recreate_record(record: Container, docker_container=None) -> Container:
+        if docker_container is not None:
+            try:
+                docker_container.remove(force=True)
+            except DockerNotFound:
+                pass
+        await db.delete(record)
+        await db.commit()
+        created = await create_container(db, user_id)
+        if created is not None:
+            return created
+        found = await get_container(db, user_id)
+        if found is not None:
+            return found
+        raise RuntimeError("Failed to recreate container")
+
     if record.status == "paused":
         try:
             c = client.containers.get(record.docker_id)
+            if not _container_matches_runtime(c):
+                return await recreate_record(record, c)
             c.unpause()
             await db.execute(
                 update(Container)
@@ -691,32 +759,18 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
             record.status = "running"
         except DockerNotFound:
             # Container was removed externally — recreate
-            await db.delete(record)
-            await db.commit()
-            created = await create_container(db, user_id)
-            if created is not None:
-                return created
-            record = await get_container(db, user_id)
-            if record is not None:
-                return record
-            raise RuntimeError("Failed to recreate container")
+            return await recreate_record(record)
 
     elif record.status == "archived":
         # Recreate from persisted data volumes
-        await db.delete(record)
-        await db.commit()
-        created = await create_container(db, user_id)
-        if created is not None:
-            return created
-        record = await get_container(db, user_id)
-        if record is not None:
-            return record
-        raise RuntimeError("Failed to recreate container")
+        return await recreate_record(record)
 
     elif record.status == "running":
         # Verify it's actually running
         try:
             c = client.containers.get(record.docker_id)
+            if not _container_matches_runtime(c):
+                return await recreate_record(record, c)
             if c.status != "running":
                 c.start()
                 c.reload()
@@ -734,15 +788,7 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
                     await db.commit()
                 break
         except DockerNotFound:
-            await db.delete(record)
-            await db.commit()
-            created = await create_container(db, user_id)
-            if created is not None:
-                return created
-            record = await get_container(db, user_id)
-            if record is not None:
-                return record
-            raise RuntimeError("Failed to recreate container")
+            return await recreate_record(record)
 
     return record
 

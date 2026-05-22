@@ -162,7 +162,12 @@ export default function SkillStore() {
     setInstallError('')
     try {
       const result = await uploadSkillZip(file)
-      setUploadMsg(`技能「${result.name}」上传成功`)
+      const installedCount = result.installed?.length || 1
+      setUploadMsg(
+        installedCount > 1
+          ? `已上传 ${installedCount} 个技能，首个为「${result.name}」`
+          : `技能「${result.name}」上传成功`
+      )
       refreshSkills()
       setTimeout(() => setUploadMsg(''), 3000)
     } catch (err: any) {

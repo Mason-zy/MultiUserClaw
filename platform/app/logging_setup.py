@@ -27,14 +27,16 @@ class ColorFormatter(logging.Formatter):
 
 def setup_logging() -> None:
     """配置全局日志。"""
+    log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
+
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
+    root.setLevel(log_level)
 
     # 清除已有 handler，防止重复输出
     root.handlers.clear()
 
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.DEBUG)
+    handler.setLevel(log_level)
     handler.setFormatter(ColorFormatter(
         fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%H:%M:%S",

@@ -107,6 +107,27 @@ class DedicatedOpenClawBackend(RuntimeBackend):
     async def delete_session(self, ctx: RuntimeContext, session_key: str):
         return await self._request(ctx, "DELETE", f"/api/sessions/{session_key}")
 
+    async def abort_run(self, ctx: RuntimeContext, run_id: str, session_key: str = "") -> dict:
+        try:
+            payload = await self._request(ctx, "POST", f"/api/runs/{run_id}/abort", json={"sessionKey": session_key})
+            return payload if isinstance(payload, dict) else {"ok": True, "aborted": True, "runIds": [run_id]}
+        except Exception:
+            return {"ok": False, "aborted": False, "runIds": []}
+
+    async def abort_active_session(self, ctx: RuntimeContext, session_key: str) -> dict:
+        try:
+            payload = await self._request(ctx, "POST", f"/api/sessions/{session_key}/abort-active")
+            return payload if isinstance(payload, dict) else {"ok": True, "aborted": True, "runIds": []}
+        except Exception:
+            return {"ok": False, "aborted": False, "runIds": []}
+
+    async def list_commands(self, ctx: RuntimeContext, agent_id: str = "") -> dict:
+        try:
+            payload = await self._request(ctx, "GET", "/api/commands", params={"agentId": agent_id} if agent_id else None)
+            return payload if isinstance(payload, dict) else {"agentId": agent_id, "commands": []}
+        except Exception:
+            return {"agentId": agent_id, "commands": []}
+
     async def upload_file(
         self,
         ctx: RuntimeContext,
