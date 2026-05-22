@@ -515,6 +515,7 @@ python prepare.py
 # === Docker 部署（推荐） ===
 
 # 本地 Docker 部署（localhost 访问）
+bash build_base_image.sh  #基础镜像先构建，构建hermes镜像 
 python deploy_docker.py
 
 # 重新构建指定服务（Hermes 是默认底层 runtime 镜像）
