@@ -46,9 +46,6 @@ import shutil
 import subprocess
 import sys
 import time
-
-from scripts.ensure_docker_desktop import apply_path_to_environment, ensure_docker_desktop
-
 # ── 颜色输出 ──────────────────────────────────────────────────────────
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -117,9 +114,6 @@ def check_prerequisites():
     log("检查前置依赖...")
 
     if env_flag(AUTO_START_DOCKER_ENV):
-        docker_result = ensure_docker_desktop(timeout_seconds=120)
-        if docker_result.path_to_prepend:
-            apply_path_to_environment(docker_result.path_to_prepend)
         if not docker_result.ok:
             error(docker_result.error or "Docker daemon 未运行，请先启动 Docker")
             sys.exit(1)
