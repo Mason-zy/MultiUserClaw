@@ -3,6 +3,8 @@ FROM hermes-base:${BASE_TAG}
 
 ENV PYTHONUNBUFFERED=1
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
@@ -10,15 +12,7 @@ ARG HERMES_INSTALL_BROWSER=false
 ARG HERMES_INSTALL_WHATSAPP_BRIDGE=false
 ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 
-# Use domestic mirror for apt (for any additional system packages)
-RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources && \
-    sed -i 's|http://security.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-        libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
-        libffi-dev shared-mime-info chromium python3-pip && \
-    rm -rf /var/lib/apt/lists/* && \
-    pip3 install --break-system-packages requests
+# hermes-base already installs the required browser/system dependencies.
 
 WORKDIR /opt/hermes
 RUN npm config set fetch-retries 5 && \
@@ -39,11 +33,9 @@ COPY --chown=hermes:hermes pyproject.toml requirements.txt ./
 COPY --chown=hermes:hermes acp_adapter agent cron gateway hermes_cli plugins tools ./
 COPY --chown=hermes:hermes batch_runner.py cli.py hermes_constants.py hermes_logging.py hermes_state.py hermes_time.py model_tools.py rl_cli.py run_agent.py setup.py toolset_distributions.py toolsets.py trajectory_compressor.py utils.py ./
 
-RUN chown -R hermes:hermes /opt/hermes
-USER hermes
 RUN if [ ! -d /opt/hermes/.venv ]; then uv venv --seed /opt/hermes/.venv; fi && \
-    uv pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple setuptools wheel weasyprint && \
-    uv pip install --no-build-isolation --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple --extra-index-url https://pypi.org/simple/ -e ".[all]"
+    uv pip install --no-cache-dir setuptools wheel weasyprint && \
+    uv pip install --no-build-isolation --no-cache-dir -e ".[all]"
 
 COPY --chown=hermes:hermes . /opt/hermes
 USER root

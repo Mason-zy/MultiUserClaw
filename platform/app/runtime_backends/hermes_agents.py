@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
+
 DEFAULT_HERMES_MODEL = "hermes-agent"
 
 _SESSION_AGENT_RE = re.compile(r"^agent:([^:]+):")
@@ -25,6 +27,16 @@ def _defaults_path() -> Path:
 
 def _agents_dir() -> Path:
     return _deploy_copy_dir() / "Agents"
+
+
+def _agent_dir(agent_id: str) -> Path:
+    root = _agents_dir().resolve()
+    path = (root / agent_id).resolve()
+    if root not in path.parents or not path.is_dir():
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return path
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -78,6 +90,43 @@ def _agent_dirs() -> list[str]:
         for entry in root.iterdir()
         if entry.is_dir() and entry.name and not entry.name.startswith(".")
     )
+
+
+def list_agent_files(agent_id: str) -> dict[str, Any]:
+    agent_dir = _agent_dir(agent_id)
+    files: list[dict[str, Any]] = []
+    for path in sorted(agent_dir.iterdir(), key=lambda item: item.name):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        stat = path.stat()
+        files.append({
+            "name": path.name,
+            "path": path.name,
+            "missing": False,
+            "size": stat.st_size,
+            "updatedAtMs": int(stat.st_mtime * 1000),
+        })
+    return {
+        "agentId": agent_id,
+        "workspace": f"Agents/{agent_id}",
+        "files": files,
+    }
+
+
+def get_agent_file(agent_id: str, name: str) -> dict[str, Any]:
+    agent_dir = _agent_dir(agent_id)
+    path = (agent_dir / name).resolve()
+    if agent_dir not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="Agent file not found")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=415, detail="Agent file is not UTF-8 text") from exc
+    return {
+        "agentId": agent_id,
+        "workspace": f"Agents/{agent_id}",
+        "file": {"name": path.name, "content": content},
+    }
 
 
 def _identity_name(agent_id: str) -> str:
