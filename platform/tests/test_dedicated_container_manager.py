@@ -107,7 +107,6 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     assert env["GATEWAY_ALLOW_ALL_USERS"] == "true"
     assert env["OPENAI_API_KEY"] == "proxy-key"
     assert env["HERMES_API_TOOLSETS"] == "none"
-    assert env["INFOX_MED_TOKEN"] == "sso-token"
     assert "BRIDGE_ENABLE_CHANNELS" not in env
 
 

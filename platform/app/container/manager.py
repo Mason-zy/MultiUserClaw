@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db.models import Container, User, UserPortBinding
+from app.db.models import Container, UserPortBinding
 
 _client: docker.DockerClient | None = None
 
@@ -107,7 +107,7 @@ def _runtime_command() -> list[str]:
     return ["node", "bridge/dist/bridge/start.js"]
 
 
-def _runtime_environment(container_token: str, sso_token: str | None) -> dict[str, str]:
+def _runtime_environment(container_token: str) -> dict[str, str]:
     env = {
         "NANOBOT_PROXY__URL": "http://gateway:8080/llm/v1",
         "NANOBOT_PROXY__TOKEN": container_token,
@@ -131,8 +131,6 @@ def _runtime_environment(container_token: str, sso_token: str | None) -> dict[st
                 "HERMES_SERVICE_TIER": settings.hermes_service_tier,
             }
         )
-    if sso_token:
-        env["INFOX_MED_TOKEN"] = sso_token
     return env
 
 
@@ -605,12 +603,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     except DockerNotFound:
         pass
 
-    # Fetch user's SSO token if available (e.g. InfoX-Med)
-    user_result = await db.execute(select(User).where(User.id == user_id))
-    user_row = user_result.scalar_one_or_none()
-    sso_token = getattr(user_row, "sso_token", None) if user_row else None
-
-    container_env = _runtime_environment(container_token, sso_token)
+    container_env = _runtime_environment(container_token)
 
     run_kwargs = {
         "image": _runtime_image(),
