@@ -94,7 +94,7 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "none")
     monkeypatch.setattr(manager.settings, "container_tz", "Asia/Shanghai")
 
-    env = manager._runtime_environment("container-token", "sso-token")
+    env = manager._runtime_environment("container-token")
 
     assert env["NANOBOT_PROXY__URL"] == "http://gateway:8080/llm/v1"
     assert env["NANOBOT_PROXY__TOKEN"] == "container-token"
