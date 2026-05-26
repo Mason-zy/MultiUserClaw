@@ -131,8 +131,6 @@ def _runtime_environment(container_token: str, sso_token: str | None) -> dict[st
                 "HERMES_SERVICE_TIER": settings.hermes_service_tier,
             }
         )
-    if sso_token:
-        env["INFOX_MED_TOKEN"] = sso_token
     return env
 
 
@@ -608,7 +606,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     # Fetch user's SSO token if available (e.g. InfoX-Med)
     user_result = await db.execute(select(User).where(User.id == user_id))
     user_row = user_result.scalar_one_or_none()
-    sso_token = user_row.sso_token if user_row else None
+    # sso_token = user_row.sso_token if user_row else None
 
     container_env = _runtime_environment(container_token, sso_token)
 
