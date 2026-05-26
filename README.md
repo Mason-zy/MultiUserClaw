@@ -521,7 +521,7 @@ python deploy_docker.py --rebuild hermes
 它构建的是hermes_agent:latest
 
 # 重新构建指定服务（Hermes 是默认底层 runtime 镜像）
-python deploy_docker.py --rebuild hermes,gateway,frontend
+python deploy_docker.py --rebuild hermes,gateway,frontend --fast
 
 # 默认 Hermes 镜像跳过 Chromium 预装，并禁用浏览器相关 npm 安装脚本以加快构建；需要 browser 工具时显式打开
 python deploy_docker.py --rebuild hermes --with-browser

@@ -11,7 +11,6 @@ from app.container.manager import ensure_running
 from app.db.engine import async_session, get_db
 from app.db.models import User
 from app.runtime_backend import RuntimeContext
-from app.runtime_backends.hermes_agents import get_agent_file, list_agent_files
 from app.runtime_backends.hermes_files import (
     browse_hermes_filemanager,
     delete_hermes_filemanager_path,
@@ -48,25 +47,6 @@ async def list_dedicated_agents(
 ):
     backend = get_runtime_backend(user)
     return await backend.get_agent_info(RuntimeContext(user=user, scope="dedicated"))
-
-
-@router.get("/api/openclaw/agents/{agent_id}/files")
-async def list_dedicated_agent_files(
-    agent_id: str,
-    user: User = Depends(get_current_user),
-):
-    _ = user
-    return list_agent_files(agent_id)
-
-
-@router.get("/api/openclaw/agents/{agent_id}/files/{name:path}")
-async def get_dedicated_agent_file(
-    agent_id: str,
-    name: str,
-    user: User = Depends(get_current_user),
-):
-    _ = user
-    return get_agent_file(agent_id, name)
 
 
 @router.get("/api/openclaw/skills")
