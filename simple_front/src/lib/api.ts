@@ -229,6 +229,58 @@ export interface BrowseFileResult {
 
 export type BrowseResult = BrowseDirectoryResult | BrowseFileResult
 
+export interface KnowledgePageMeta {
+  path: string
+  name: string
+  title: string
+  type?: string | null
+  domain?: string | null
+  status?: string | null
+  tags: string[]
+  summary?: string | null
+  created?: string | null
+  updated?: string | null
+  size: number
+  modified: string
+  wikilinks: string[]
+}
+
+export interface KnowledgeListResult {
+  agentId: string
+  knowledgeRoot: string
+  exists: boolean
+  pages: KnowledgePageMeta[]
+  directories?: Array<{
+    path: string
+    name: string
+    modified: string
+  }>
+  attachments?: Array<{
+    path: string
+    name: string
+    size: number
+    modified: string
+  }>
+}
+
+export interface KnowledgeReadResult {
+  page: KnowledgePageMeta
+  content: string
+  backlinks: string[]
+}
+
+export interface KnowledgeSearchResult {
+  path: string
+  title: string
+  line: number
+  text: string
+}
+
+export interface KnowledgeGraphResult {
+  nodes: Array<{ id: string; title: string; type?: string | null; tags: string[] }>
+  edges: Array<{ source: string; target: string }>
+}
+
 // ---------------------------------------------------------------------------
 // Token management
 // ---------------------------------------------------------------------------
@@ -822,6 +874,34 @@ export async function downloadManagedFile(entry: FileEntry): Promise<void> {
   link.download = entry.name
   link.click()
   URL.revokeObjectURL(blobUrl)
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge base
+// ---------------------------------------------------------------------------
+
+export async function listKnowledge(agentId: string): Promise<KnowledgeListResult> {
+  return fetchJSON<KnowledgeListResult>(
+    `/api/openclaw/knowledge/list?agentId=${encodeURIComponent(agentId)}`,
+  )
+}
+
+export async function readKnowledge(agentId: string, path: string): Promise<KnowledgeReadResult> {
+  return fetchJSON<KnowledgeReadResult>(
+    `/api/openclaw/knowledge/read?agentId=${encodeURIComponent(agentId)}&path=${encodeURIComponent(path)}`,
+  )
+}
+
+export async function searchKnowledge(agentId: string, query: string): Promise<{ results: KnowledgeSearchResult[] }> {
+  return fetchJSON<{ results: KnowledgeSearchResult[] }>(
+    `/api/openclaw/knowledge/search?agentId=${encodeURIComponent(agentId)}&q=${encodeURIComponent(query)}`,
+  )
+}
+
+export async function getKnowledgeGraph(agentId: string): Promise<KnowledgeGraphResult> {
+  return fetchJSON<KnowledgeGraphResult>(
+    `/api/openclaw/knowledge/graph?agentId=${encodeURIComponent(agentId)}`,
+  )
 }
 
 // ---------------------------------------------------------------------------

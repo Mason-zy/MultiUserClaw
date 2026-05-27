@@ -27,6 +27,12 @@ from app.runtime_backends.hermes_files import (
     normalize_hermes_filemanager_path,
     write_hermes_filemanager_file,
 )
+from app.runtime_backends.hermes_knowledge import (
+    knowledge_graph,
+    list_knowledge_pages,
+    read_knowledge_page,
+    search_knowledge_pages,
+)
 from app.runtime_backends.hermes_skills import (
     delete_skill_from_hermes_container,
     install_existing_skill_to_hermes_scope,
@@ -533,6 +539,48 @@ async def list_dedicated_commands(
 ):
     backend = get_runtime_backend(user)
     return await backend.list_commands(RuntimeContext(user=user, scope="dedicated"), agentId)
+
+
+@router.get("/api/openclaw/knowledge/list")
+async def list_dedicated_knowledge(
+    agentId: str = "main",
+    user: User = Depends(get_current_user),
+):
+    async with async_session() as db:
+        container = await ensure_running(db, user.id)
+    return list_knowledge_pages(container.docker_id, agentId)
+
+
+@router.get("/api/openclaw/knowledge/read")
+async def read_dedicated_knowledge(
+    path: str,
+    agentId: str = "main",
+    user: User = Depends(get_current_user),
+):
+    async with async_session() as db:
+        container = await ensure_running(db, user.id)
+    return read_knowledge_page(container.docker_id, agentId, path)
+
+
+@router.get("/api/openclaw/knowledge/search")
+async def search_dedicated_knowledge(
+    q: str = "",
+    agentId: str = "main",
+    user: User = Depends(get_current_user),
+):
+    async with async_session() as db:
+        container = await ensure_running(db, user.id)
+    return search_knowledge_pages(container.docker_id, agentId, q)
+
+
+@router.get("/api/openclaw/knowledge/graph")
+async def graph_dedicated_knowledge(
+    agentId: str = "main",
+    user: User = Depends(get_current_user),
+):
+    async with async_session() as db:
+        container = await ensure_running(db, user.id)
+    return knowledge_graph(container.docker_id, agentId)
 
 
 @router.post("/api/openclaw/filemanager/upload")

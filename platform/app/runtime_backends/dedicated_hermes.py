@@ -22,6 +22,7 @@ from app.runtime_backends.hermes_files import (
     read_data_file_from_hermes_container,
     write_upload_to_hermes_container,
 )
+from app.runtime_backends.hermes_knowledge import build_knowledge_context
 from app.runtime_backends.hermes_agents import (
     agent_id_from_session_key,
     agent_identity_prompt_from_hermes_container,
@@ -440,13 +441,17 @@ class DedicatedHermesBackend:
         title = _fallback_title(message) if not conversation_history else None
         async with async_session() as db:
             container = await ensure_running(db, ctx.user.id)
+        instructions = agent_identity_prompt_from_hermes_container(container.docker_id, agent_id)
+        knowledge_context = build_knowledge_context(container.docker_id, agent_id, message)
+        if knowledge_context:
+            instructions = f"{instructions}\n\n{knowledge_context}" if instructions else knowledge_context
         payload = await (await self._client(ctx)).create_run(
             message=message,
             session_id=session_key or None,
             session_key=session_key or None,
             model=model_for_session_key(session_key),
             conversation_history=conversation_history,
-            instructions=agent_identity_prompt_from_hermes_container(container.docker_id, agent_id),
+            instructions=instructions,
         )
         run_id = payload.get("run_id") if isinstance(payload, dict) else None
         effective_session_key = payload.get("session_id") if isinstance(payload, dict) else None
