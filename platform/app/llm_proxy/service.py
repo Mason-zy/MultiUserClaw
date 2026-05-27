@@ -351,11 +351,7 @@ async def proxy_chat_completion(
                 user_result = await db.execute(select(User).where(User.id == container.user_id))
                 user = user_result.scalar_one_or_none()
 
-        # Shared runtime service token: allowed, but usage/quota is enforced at higher layers.
-        if user is None and settings.shared_openclaw_system_token and container_token == settings.shared_openclaw_system_token:
-            logger.info("Accepted shared OpenClaw system token for LLM proxy request")
-
-        elif user is None:
+        if user is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
         if user is not None:

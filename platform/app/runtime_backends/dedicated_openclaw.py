@@ -15,8 +15,6 @@ from app.runtime_backend import RuntimeBackend, RuntimeContext
 
 class DedicatedOpenClawBackend(RuntimeBackend):
     async def _base_url(self, ctx: RuntimeContext) -> str:
-        if ctx.user.runtime_mode == "shared":
-            raise HTTPException(status_code=409, detail="User is assigned to shared OpenClaw mode; use /api/shared-openclaw instead")
         if settings.dev_openclaw_url:
             return settings.dev_openclaw_url
         async with async_session() as db:
@@ -163,7 +161,7 @@ class DedicatedOpenClawBackend(RuntimeBackend):
             user = await get_user_by_id(db, payload["sub"])
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
-            stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
+            stream_ctx = RuntimeContext(user=user)
             base_url = await self._base_url(stream_ctx)
 
         target_url = f"{base_url}/api/events/stream"
@@ -192,7 +190,7 @@ class DedicatedOpenClawBackend(RuntimeBackend):
             user = await get_user_by_id(db, payload["sub"])
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
-            stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
+            stream_ctx = RuntimeContext(user=user)
             base_url = await self._base_url(stream_ctx)
 
         target_url = f"{base_url}/api/runs/{run_id}/events"

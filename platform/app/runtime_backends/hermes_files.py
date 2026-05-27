@@ -17,8 +17,6 @@ from app.container.manager import get_docker_container
 DEFAULT_HERMES_UPLOAD_DIR = "workspace/uploads"
 HERMES_DATA_ROOT = "/opt/data"
 HERMES_DATA_ROOTS = (HERMES_DATA_ROOT, "/workspace")
-SHARED_HERMES_CONTAINER_NAME = "openclaw-shared"
-
 
 def _exec_output(result) -> tuple[int, bytes]:
     if isinstance(result, tuple):

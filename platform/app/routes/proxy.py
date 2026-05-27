@@ -351,8 +351,6 @@ def _hermes_empty_compat(path: str, request: Request) -> JSONResponse | None:
 
 async def _container_url(db: AsyncSession, user: User) -> str:
     """Get the internal URL for the user's openclaw container, starting it if needed."""
-    if user.runtime_mode == "shared":
-        raise HTTPException(status_code=409, detail="User is assigned to shared OpenClaw mode; use /api/shared-openclaw instead")
     # Local dev mode: bypass Docker, forward to local openclaw web directly
     if settings.dev_openclaw_url:
         return settings.dev_openclaw_url

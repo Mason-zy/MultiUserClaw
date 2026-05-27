@@ -134,7 +134,6 @@ def register_user(
     username: str,
     email: str,
     password: str,
-    runtime_mode: str = "dedicated",
 ) -> dict:
     """Register a new user and return the token response."""
     result = json_request(
@@ -144,7 +143,6 @@ def register_user(
             "username": username,
             "email": email,
             "password": password,
-            "runtime_mode": runtime_mode,
         },
     )
     _test_users.append({"username": username, "user_id": result.get("user_id")})

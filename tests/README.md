@@ -47,7 +47,6 @@ OPENCLAW_BASE_URL=http://127.0.0.1:8080 pytest -v
 | `test_ping.py` | 健康检查 | `GET /api/ping` |
 | `test_auth.py` | 认证 | `POST /api/auth/register`、`POST /api/auth/login`、`POST /api/auth/refresh`、`GET /api/auth/me`、`POST /api/auth/api-token`、`PUT /api/auth/change-password` |
 | `test_openclaw_dedicated.py` | 专属运行时 | `GET /api/openclaw/agents`、`GET /api/openclaw/skills`、`POST /api/openclaw/marketplaces/skills/search`、`POST /api/openclaw/runtime/prewarm`、`GET /api/openclaw/sessions`、`GET /api/openclaw/commands`、`GET /api/openclaw/container/info`、`GET /api/openclaw/ping` |
-| `test_openclaw_shared.py` | 共享运行时 | `GET /api/shared-openclaw/me`、`POST /api/shared-openclaw/runtime/prewarm`、`GET /api/shared-openclaw/sessions` |
 | `test_admin.py` | 管理员管理 | `GET/POST /api/admin/users`、`PUT /api/admin/users/{id}`、`PUT /api/admin/users/{id}/password`、`POST /api/admin/containers/sync`、`GET /api/admin/usage/summary`、`GET /api/admin/usage/history`、`GET /api/admin/audit` |
 | `test_filemanager.py` | 文件管理器 | `GET /api/openclaw/filemanager/browse`、`POST /api/openclaw/filemanager/mkdir`、`DELETE /api/openclaw/filemanager/delete` |
 | `test_llm.py` | LLM 代理 | `POST /llm/v1/chat/completions` |

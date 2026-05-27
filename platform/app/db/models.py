@@ -29,8 +29,6 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")  # user | admin
     quota_tier: Mapped[str] = mapped_column(String(16), nullable=False, default="free")  # free | basic | pro
-    # 运行模式，dedicated表示独立容器，shared表示用户共享openclaw
-    runtime_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="dedicated", server_default="dedicated")  # dedicated | shared
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # SSO fields (e.g. 如果需要SSO登录，需要这2个字段)
     # sso_uid: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)
@@ -70,34 +68,6 @@ class UserPortBinding(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
-
-
-class SharedAgentBinding(Base):
-    """创建共享openclaw时需要的Agent表，Mapping between a platform user and a logical agent inside the shared OpenClaw runtime."""
-
-    __tablename__ = "shared_agent_bindings"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
-    openclaw_agent_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
-    workspace_dir: Mapped[str] = mapped_column(String(256), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
-
-
-class RuntimeRun(Base):
-    """Ownership mapping for async runtime runs started through shared backends."""
-
-    __tablename__ = "runtime_runs"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    run_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
-    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    session_key: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
-    runtime_mode: Mapped[str] = mapped_column(String(16), nullable=False)
-    backend: Mapped[str] = mapped_column(String(32), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class UsageRecord(Base):

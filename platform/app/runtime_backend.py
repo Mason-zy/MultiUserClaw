@@ -11,7 +11,6 @@ from app.db.models import User
 @dataclass(slots=True)
 class RuntimeContext:
     user: User
-    scope: str
 
 
 class RuntimeBackend(Protocol):

@@ -119,21 +119,20 @@ def test_register_duplicate_email_fails():
         assert "400" in str(exc) or "邮箱已被注册" in str(exc)
 
 
-def test_register_invalid_runtime_mode():
-    try:
-        json_request(
-            api_url("/api/auth/register"),
-            method="POST",
-            payload={
-                "username": unique_username("badmode"),
-                "email": unique_email(unique_username("badmode")),
-                "password": "test123456",
-                "runtime_mode": "invalid",
-            },
-        )
-        assert False, "Expected error for invalid runtime_mode"
-    except RuntimeError as exc:
-        assert "400" in str(exc)
+def test_register_any_runtime_mode_accepted():
+    """runtime_mode field is accepted but no longer validated — all users are dedicated."""
+    username = unique_username("anymode")
+    result = json_request(
+        api_url("/api/auth/register"),
+        method="POST",
+        payload={
+            "username": username,
+            "email": unique_email(username),
+            "password": "test123456",
+            "runtime_mode": "whatever_ignored",
+        },
+    )
+    assert "access_token" in result
 
 
 # ---------------------------------------------------------------------------

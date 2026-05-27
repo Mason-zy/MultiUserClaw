@@ -167,8 +167,6 @@ def model_for_session_key(session_key: str | None, fallback: str = DEFAULT_HERME
 def build_agent_info(
     models: list[Any],
     *,
-    scope: str,
-    runtime_mode: str,
     default_id: str | None = None,
 ) -> dict[str, Any]:
     configured_ids = _configured_agent_ids()
@@ -179,8 +177,7 @@ def build_agent_info(
             "agents": agents,
             "defaultId": resolved_default,
             "mainKey": f"agent:{resolved_default}",
-            "scope": scope,
-            "runtime_mode": runtime_mode,
+            "runtime_mode": "dedicated",
         }
 
     defaults = _read_json(_defaults_path())
@@ -207,6 +204,5 @@ def build_agent_info(
         "agents": agents,
         "defaultId": resolved_default,
         "mainKey": f"agent:{resolved_default}",
-        "scope": scope,
-        "runtime_mode": runtime_mode,
+        "runtime_mode": "dedicated",
     }
