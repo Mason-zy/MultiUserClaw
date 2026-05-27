@@ -33,8 +33,8 @@ class User(Base):
     runtime_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="dedicated", server_default="dedicated")  # dedicated | shared
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # SSO fields (e.g. 如果需要SSO登录，需要这2个字段)
-    # sso_uid: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)
-    # sso_token: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    sso_uid: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)
+    sso_token: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
