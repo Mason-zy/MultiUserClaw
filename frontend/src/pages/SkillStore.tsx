@@ -144,7 +144,7 @@ export default function SkillStore() {
     setDeleting(skill.name)
     setInstallError('')
     try {
-      await deleteSkill(skill.name)
+      await deleteSkill(skill.path || skill.name)
       setSkills(prev => prev.filter(s => s.name !== skill.name))
     } catch (err: any) {
       setInstallError(err?.message || `删除技能「${skill.name}」失败`)
@@ -188,7 +188,8 @@ export default function SkillStore() {
       const blob = await res.blob()
       const a = document.createElement('a')
       a.href = URL.createObjectURL(blob)
-      a.download = `${name}.zip`
+      const filename = name.includes('/') ? name.split('/').pop()! : name
+      a.download = `${filename}.zip`
       a.click()
       URL.revokeObjectURL(a.href)
     } catch {
@@ -638,7 +639,7 @@ export default function SkillStore() {
                     </div>
                     <div className="flex items-center gap-1">
                       <button
-                        onClick={(e) => { e.stopPropagation(); handleDownload(skill.name) }}
+                        onClick={(e) => { e.stopPropagation(); handleDownload(skill.path || skill.name) }}
                         className="flex items-center gap-1 rounded px-2 py-1 text-xs text-dark-text-secondary hover:text-accent-blue hover:bg-accent-blue/10 transition-colors"
                         title={`下载 ${skill.name}.zip`}
                       >

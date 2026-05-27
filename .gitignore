@@ -65,6 +65,8 @@ cache
 docs/
 openclaw/bridge-deploy-copy
 hermes-agent/deploy-copy
+platform/deploy_copy/*
+!platform/deploy_copy/.gitkeep
 openclaw/dist-runtime
 simple_front/dist
 openclaw/packages/libsignal-node/

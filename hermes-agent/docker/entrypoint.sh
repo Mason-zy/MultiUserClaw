@@ -153,6 +153,28 @@ source "${INSTALL_DIR}/.venv/bin/activate"
 cd "$INSTALL_DIR"
 export PYTHONPATH="$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
+# Auto-detect Playwright chromium headless-shell binary path.
+# Playwright versions differ in directory layout:
+#   - older:  chromium_headless_shell-XXXX/chrome-linux/headless_shell
+#   - newer:  chromium_headless_shell-XXXX/chrome-headless-shell-linux64/chrome-headless-shell
+# Only override AGENT_BROWSER_EXECUTABLE_PATH if it hasn't been explicitly set.
+if [ -z "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ]; then
+    pw_root="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+    for hs_dir in "$pw_root"/chromium_headless_shell-*; do
+        [ -d "$hs_dir" ] || continue
+        # Try newer layout first, then older layout
+        for candidate in \
+            "$hs_dir/chrome-headless-shell-linux64/chrome-headless-shell" \
+            "$hs_dir/chrome-linux/headless_shell"; do
+            if [ -x "$candidate" ]; then
+                export AGENT_BROWSER_EXECUTABLE_PATH="$candidate"
+                echo "Auto-detected browser: $AGENT_BROWSER_EXECUTABLE_PATH"
+                break 2
+            fi
+        done
+    done
+fi
+
 # Create essential directory structure.  Cache and platform directories
 # (cache/images, cache/audio, platforms/whatsapp, etc.) are created on
 # demand by the application — don't pre-create them here so new installs
@@ -286,6 +308,33 @@ if [ ! -f "$HERMES_HOME/SOUL.md" ]; then
     cp "$INSTALL_DIR/docker/SOUL.md" "$HERMES_HOME/SOUL.md"
 fi
 chmod 644 "$HERMES_HOME/SOUL.md"
+
+# Active Agent config injection (controlled by HERMES_ACTIVE_AGENT env var)
+# Defaults to "main" when not set.
+ACTIVE_AGENT="${HERMES_ACTIVE_AGENT:-main}"
+ACTIVE_AGENT_DIR="$INSTALL_DIR/deploy_copy/Agents/$ACTIVE_AGENT"
+if [ -d "$ACTIVE_AGENT_DIR" ]; then
+    # SOUL.md — overwrite with active agent version
+    if [ -f "$ACTIVE_AGENT_DIR/SOUL.md" ]; then
+        cp "$ACTIVE_AGENT_DIR/SOUL.md" "$HERMES_HOME/SOUL.md"
+        chmod 644 "$HERMES_HOME/SOUL.md"
+    fi
+    # AGENTS.md, IDENTITY.md → workspace/
+    for f in AGENTS.md IDENTITY.md; do
+        if [ -f "$ACTIVE_AGENT_DIR/$f" ]; then
+            cp "$ACTIVE_AGENT_DIR/$f" "$HERMES_HOME/workspace/$f"
+            chmod 644 "$HERMES_HOME/workspace/$f"
+        fi
+    done
+    # USER.md → memories/
+    if [ -f "$ACTIVE_AGENT_DIR/USER.md" ]; then
+        cp "$ACTIVE_AGENT_DIR/USER.md" "$HERMES_HOME/memories/USER.md"
+        chmod 644 "$HERMES_HOME/memories/USER.md"
+    fi
+    echo "✓ ${ACTIVE_AGENT} agent config injected"
+else
+    echo "⚠ Agent directory not found: $ACTIVE_AGENT_DIR"
+fi
 
 # auth.json: bootstrap from env on first boot only.  Used by orchestrators
 # that need to seed the OAuth refresh credential non-interactively.

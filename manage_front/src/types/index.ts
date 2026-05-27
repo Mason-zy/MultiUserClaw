@@ -24,6 +24,15 @@ export interface UserSummary {
   tokens_used_today: number;
 }
 
+export interface CreateUserRequest {
+  username: string;
+  email: string;
+  password: string;
+  role?: string;
+  quota_tier?: string;
+  runtime_mode?: string;
+}
+
 export interface PaginatedUsers {
   items: UserSummary[];
   total: number;

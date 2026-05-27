@@ -31,7 +31,8 @@ import {
   listSlashCommands,
   uploadFileToWorkspace,
 } from '../lib/api'
-import type { Session, SessionDetail, AgentInfo } from '../lib/api'
+import type { Session, SessionDetail, AgentInfo, ChatMessage } from '../lib/api'
+import { ToolCallGroupCard, ThinkingCard, LiveToolCallsCard, LiveReasoningCard, groupToolCalls, type ToolCallGroup, type LiveToolCallInfo } from '../components/CollapsibleCard'
 import {
   buildSlashCommandItems,
   CATEGORY_LABELS,
@@ -98,6 +99,9 @@ export default function Chat() {
   const [agentRunning, setAgentRunning] = useState(false)
   const [error, setError] = useState('')
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  // Live streaming state: tool calls and reasoning shown in real-time
+  const [liveToolCalls, setLiveToolCalls] = useState<LiveToolCallInfo[]>([])
+  const [liveReasoning, setLiveReasoning] = useState('')
   // Typewriter streaming: targetText is the full text from SSE, displayedText is what's shown
   const [displayedText, setDisplayedText] = useState('')
   const targetTextRef = useRef('')
@@ -385,7 +389,7 @@ export default function Chat() {
       let finalMessage = text
       if (uploadedPaths.length > 0) {
         const fileRefs = uploadedPaths
-          .map(p => `[附件: ~/.openclaw/${p}]`)
+          .map(p => `[附件: /opt/data/${p}]`)
           .join('\n')
         finalMessage = finalMessage
           ? `${finalMessage}\n\n${fileRefs}`
@@ -418,6 +422,12 @@ export default function Chat() {
       const baselineAssistantCount = messages.filter(msg => msg.role === 'assistant').length
       registerPendingSession(activeSessionKey, baselineAssistantCount)
       const sendResult = await sendChatMessage(activeSessionKey, finalMessage)
+
+      // Auto-set session title from first user message
+      if (messages.length === 0 && text) {
+        const autoTitle = text.replace(/\n/g, ' ').slice(0, 50)
+        updateSessionTitle(activeSessionKey, autoTitle).catch(() => {})
+      }
 
       // Wait for response completion by runId; SSE still handles incremental text.
       await waitForResponse(activeSessionKey, sendResult.runId)
@@ -497,7 +507,41 @@ export default function Chat() {
           }
 
           if (eventType === 'tool.started') {
+            const toolName = String(payload.tool || 'unknown')
+            const toolId = `live-${Date.now()}-${toolName}`
+            setLiveToolCalls(prev => [...prev, {
+              id: toolId,
+              tool: toolName,
+              preview: typeof payload.preview === 'string' ? payload.preview : undefined,
+              status: 'running',
+            }])
             setAgentRunning(true)
+            return
+          }
+
+          if (eventType === 'tool.completed') {
+            const toolName = String(payload.tool || 'unknown')
+            setLiveToolCalls(prev => {
+              // Find the last running tool with this name and mark it done/error
+              const idx = [...prev].reverse().findIndex(t => t.tool === toolName && t.status === 'running')
+              if (idx === -1) return prev
+              const realIdx = prev.length - 1 - idx
+              const updated = [...prev]
+              updated[realIdx] = {
+                ...updated[realIdx],
+                status: payload.error ? 'error' : 'done',
+                duration: typeof payload.duration === 'number' ? payload.duration : undefined,
+              }
+              return updated
+            })
+            return
+          }
+
+          if (eventType === 'reasoning.available') {
+            const text = typeof payload.text === 'string' ? payload.text : ''
+            if (text) {
+              setLiveReasoning(prev => prev ? prev + '\n' + text : text)
+            }
             return
           }
 
@@ -506,6 +550,8 @@ export default function Chat() {
               getSession(key).then(detail => {
                 setMessages(detail.messages || [])
                 setStreamingText('')
+                setLiveToolCalls([])
+                setLiveReasoning('')
                 setSending(false)
                 setAgentRunning(false)
                 sseCompletedRef.current = true
@@ -513,6 +559,8 @@ export default function Chat() {
                 resolve()
               }).catch((err) => {
                 setStreamingText('')
+                setLiveToolCalls([])
+                setLiveReasoning('')
                 setSending(false)
                 setAgentRunning(false)
                 sseCompletedRef.current = true
@@ -525,6 +573,8 @@ export default function Chat() {
           if (eventType === 'run.failed') {
             finish(() => {
               setStreamingText('')
+              setLiveToolCalls([])
+              setLiveReasoning('')
               setSending(false)
               setAgentRunning(false)
               sseCompletedRef.current = true
@@ -876,74 +926,110 @@ export default function Chat() {
                 </div>
               ) : (
                 <div className="space-y-4 max-w-3xl mx-auto">
-                  {messages.map((msg, i) => (
-                    <div
-                      key={i}
-                      className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}
-                    >
-                      {msg.role !== 'user' && (
-                        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-blue/10 text-accent-blue mt-0.5">
-                          <Bot size={14} />
+                  {groupToolCalls(messages as ChatMessage[]).map((item, i) => {
+                    // Tool call group → collapsible card
+                    if ('assistant' in item && 'toolResults' in item) {
+                      const group = item as ToolCallGroup
+                      return (
+                        <div key={`tc-${i}`} className="flex gap-3">
+                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-blue/10 text-accent-blue mt-0.5">
+                            <Bot size={14} />
+                          </div>
+                          <div className="flex-1 max-w-[80%]">
+                            <ToolCallGroupCard group={group} />
+                          </div>
                         </div>
-                      )}
-                      <div className="flex flex-col items-start max-w-[80%]">
-                        <div
-                          className={`rounded-xl px-4 py-2.5 w-full ${
-                            msg.role === 'user'
-                              ? 'bg-accent-blue text-white'
-                              : 'bg-dark-card border border-dark-border text-dark-text'
-                          }`}
-                        >
-                          {msg.role === 'user' ? (
-                            <div className="text-sm whitespace-pre-wrap break-words">{msg.content}</div>
-                          ) : (
-                            <MarkdownContent content={msg.content} />
+                      )
+                    }
+
+                    const msg = item as ChatMessage
+                    return (
+                      <div
+                        key={i}
+                        className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}
+                      >
+                        {msg.role !== 'user' && (
+                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-blue/10 text-accent-blue mt-0.5">
+                            <Bot size={14} />
+                          </div>
+                        )}
+                        <div className="flex flex-col items-start max-w-[80%]">
+                          {/* Thinking / reasoning collapsible card */}
+                          {msg.role === 'assistant' && (msg._thinking || msg.reasoning_content) && (
+                            <ThinkingCard content={(msg._thinking || msg.reasoning_content)!} />
                           )}
-                          {msg.timestamp && (
-                            <div className={`text-[10px] mt-1 ${
-                              msg.role === 'user' ? 'text-white/60' : 'text-dark-text-secondary'
-                            }`}>
-                              {formatTime(msg.timestamp)}
+                          {/* Main message bubble */}
+                          {msg.content?.trim() && (
+                            <div
+                              className={`rounded-xl px-4 py-2.5 w-full ${
+                                msg.role === 'user'
+                                  ? 'bg-accent-blue text-white'
+                                  : 'bg-dark-card border border-dark-border text-dark-text'
+                              }`}
+                            >
+                              {msg.role === 'user' ? (
+                                <div className="text-sm whitespace-pre-wrap break-words">{msg.content}</div>
+                              ) : (
+                                <MarkdownContent content={msg.content} />
+                              )}
+                              {msg.timestamp && (
+                                <div className={`text-[10px] mt-1 ${
+                                  msg.role === 'user' ? 'text-white/60' : 'text-dark-text-secondary'
+                                }`}>
+                                  {formatTime(msg.timestamp)}
+                                </div>
+                              )}
                             </div>
                           )}
+                          {msg.role !== 'user' && msg.content?.trim() && (
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(msg.content)
+                                setCopiedIdx(i)
+                                setTimeout(() => setCopiedIdx(null), 2000)
+                              }}
+                              className="flex items-center gap-1 mt-1 px-2 py-0.5 text-[11px] text-dark-text-secondary hover:text-dark-text rounded transition-colors"
+                            >
+                              {copiedIdx === i ? <><Check size={12} /> 已复制</> : <><Copy size={12} /> 复制</>}
+                            </button>
+                          )}
                         </div>
-                        {msg.role !== 'user' && (
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(msg.content)
-                              setCopiedIdx(i)
-                              setTimeout(() => setCopiedIdx(null), 2000)
-                            }}
-                            className="flex items-center gap-1 mt-1 px-2 py-0.5 text-[11px] text-dark-text-secondary hover:text-dark-text rounded transition-colors"
-                          >
-                            {copiedIdx === i ? <><Check size={12} /> 已复制</> : <><Copy size={12} /> 复制</>}
-                          </button>
+                        {msg.role === 'user' && (
+                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-purple/10 text-accent-purple mt-0.5">
+                            <User size={14} />
+                          </div>
                         )}
                       </div>
-                      {msg.role === 'user' && (
-                        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-purple/10 text-accent-purple mt-0.5">
-                          <User size={14} />
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                    )
+                  })}
                   {sending && (
                     <div className="flex gap-3">
                       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-blue/10 text-accent-blue mt-0.5">
                         <Bot size={14} />
                       </div>
-                      <div className="rounded-xl px-4 py-2.5 bg-dark-card border border-dark-border max-w-[80%]">
-                        {displayedText ? (
-                          <div className="text-dark-text">
-                            <MarkdownContent content={displayedText} />
-                            <span className="inline-block w-1.5 h-4 ml-0.5 bg-accent-blue rounded-sm animate-pulse align-text-bottom" />
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-2 text-sm text-dark-text-secondary">
-                            <Loader2 size={14} className="animate-spin" />
-                            思考中...
-                          </div>
+                      <div className="flex-1 max-w-[80%]">
+                        {/* Live reasoning */}
+                        {liveReasoning && (
+                          <LiveReasoningCard content={liveReasoning} />
                         )}
+                        {/* Live tool calls */}
+                        {liveToolCalls.length > 0 && (
+                          <LiveToolCallsCard tools={liveToolCalls} />
+                        )}
+                        {/* Streaming text bubble */}
+                        <div className="rounded-xl px-4 py-2.5 bg-dark-card border border-dark-border">
+                          {displayedText ? (
+                            <div className="text-dark-text">
+                              <MarkdownContent content={displayedText} />
+                              <span className="inline-block w-1.5 h-4 ml-0.5 bg-accent-blue rounded-sm animate-pulse align-text-bottom" />
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2 text-sm text-dark-text-secondary">
+                              <Loader2 size={14} className="animate-spin" />
+                              {liveToolCalls.some(t => t.status === 'running') ? '工具执行中...' : '思考中...'}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   )}

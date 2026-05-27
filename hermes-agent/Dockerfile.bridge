@@ -16,9 +16,13 @@ RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/
     apt-get update && \
     apt-get install -y --no-install-recommends \
         libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
-        libffi-dev shared-mime-info chromium python3-pip && \
+        libffi-dev shared-mime-info chromium python3-pip \
+        poppler-utils tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
+        libreoffice-core libreoffice-writer libreoffice-calc \
+        libmagic1 file antiword catdoc && \
     rm -rf /var/lib/apt/lists/* && \
-    pip3 install --break-system-packages requests
+    pip3 install --break-system-packages -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
+        requests pymupdf pdfplumber python-docx openpyxl python-pptx pandas xlrd odfpy python-magic chardet
 
 WORKDIR /opt/hermes
 RUN npm config set fetch-retries 5 && \
@@ -42,12 +46,14 @@ COPY --chown=hermes:hermes batch_runner.py cli.py hermes_constants.py hermes_log
 RUN chown -R hermes:hermes /opt/hermes
 USER hermes
 RUN if [ ! -d /opt/hermes/.venv ]; then uv venv --seed /opt/hermes/.venv; fi && \
-    uv pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple setuptools wheel weasyprint && \
+    uv pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple setuptools wheel weasyprint \
+        pymupdf pdfplumber python-docx openpyxl python-pptx pandas xlrd odfpy python-magic chardet && \
     uv pip install --no-build-isolation --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple --extra-index-url https://pypi.org/simple/ -e ".[all]"
 
 COPY --chown=hermes:hermes . /opt/hermes
 USER root
-RUN chmod +x /opt/hermes/docker/entrypoint.sh
+RUN find /opt/hermes -name '*.sh' -exec sed -i 's/\r$//' {} + && \
+    chmod +x /opt/hermes/docker/entrypoint.sh
 
 ENV HERMES_HOME=/opt/data
 VOLUME [ "/opt/data" ]

@@ -1,6 +1,7 @@
 import { getAccessToken, getRefreshToken, setTokens, clearTokens } from "./auth";
 import type {
   TokenResponse,
+  CreateUserRequest,
   PaginatedUsers,
   UsageSummary,
   UsageHistory,
@@ -76,6 +77,10 @@ export async function getUsers(page = 1, pageSize = 20, search = ""): Promise<Pa
 
 export async function updateUser(userId: string, data: { role?: string; quota_tier?: string; runtime_mode?: string; is_active?: boolean }) {
   return request(`/api/admin/users/${userId}`, { method: "PUT", body: JSON.stringify(data) });
+}
+
+export async function createUser(data: CreateUserRequest) {
+  return request(`/api/admin/users`, { method: "POST", body: JSON.stringify(data) });
 }
 
 export async function resetPassword(userId: string, newPassword: string) {

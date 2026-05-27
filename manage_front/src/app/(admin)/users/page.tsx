@@ -14,7 +14,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { getUsers, updateUser, resetPassword } from "@/lib/api";
+import { getUsers, updateUser, resetPassword, createUser } from "@/lib/api";
 import type { UserSummary, PaginatedUsers } from "@/types";
 import { toast } from "sonner";
 
@@ -31,6 +31,15 @@ export default function UsersPage() {
   //dedicated表示独立容器模式，shared表示共享容器模式
   const [editRuntimeMode, setEditRuntimeMode] = useState("dedicated");
   const [editActive, setEditActive] = useState(true);
+
+  // Create dialog
+  const [showCreate, setShowCreate] = useState(false);
+  const [createUsername, setCreateUsername] = useState("");
+  const [createEmail, setCreateEmail] = useState("");
+  const [createPassword, setCreatePassword] = useState("");
+  const [createRole, setCreateRole] = useState("user");
+  const [createTier, setCreateTier] = useState("free");
+  const [createRuntimeMode, setCreateRuntimeMode] = useState("dedicated");
 
   // Password dialog
   const [pwdUser, setPwdUser] = useState<UserSummary | null>(null);
@@ -75,6 +84,38 @@ export default function UsersPage() {
     }
   }
 
+  async function handleCreateUser() {
+    if (!createUsername.trim() || !createEmail.trim() || !createPassword) {
+      toast.error("请填写所有必填字段");
+      return;
+    }
+    if (createPassword.length < 8) {
+      toast.error("密码至少8位");
+      return;
+    }
+    try {
+      await createUser({
+        username: createUsername.trim(),
+        email: createEmail.trim(),
+        password: createPassword,
+        role: createRole,
+        quota_tier: createTier,
+        runtime_mode: createRuntimeMode,
+      });
+      toast.success("用户已创建");
+      setShowCreate(false);
+      setCreateUsername("");
+      setCreateEmail("");
+      setCreatePassword("");
+      setCreateRole("user");
+      setCreateTier("free");
+      setCreateRuntimeMode("dedicated");
+      fetchUsers();
+    } catch (err) {
+      toast.error("创建失败", { description: err instanceof Error ? err.message : "" });
+    }
+  }
+
   async function handleResetPassword() {
     if (!pwdUser) return;
     if (newPassword.length < 8) {
@@ -97,13 +138,14 @@ export default function UsersPage() {
     <div>
       <h2 className="text-2xl font-bold mb-6">用户管理</h2>
 
-      <div className="mb-4">
+      <div className="mb-4 flex items-center gap-4">
         <Input
           placeholder="搜索用户名或邮箱..."
           value={search}
           onChange={(e) => { setSearch(e.target.value); setPage(1); }}
           className="max-w-sm"
         />
+        <Button onClick={() => setShowCreate(true)}>添加用户</Button>
       </div>
 
       {loading ? (
@@ -224,6 +266,64 @@ export default function UsersPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditUser(null)}>取消</Button>
             <Button onClick={handleSaveEdit}>保存</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create User Dialog */}
+      <Dialog open={showCreate} onOpenChange={(open) => { if (!open) { setShowCreate(false); setCreateUsername(""); setCreateEmail(""); setCreatePassword(""); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>添加用户</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>用户名 *</Label>
+              <Input value={createUsername} onChange={(e) => setCreateUsername(e.target.value)} placeholder="用户名" />
+            </div>
+            <div>
+              <Label>邮箱 *</Label>
+              <Input value={createEmail} onChange={(e) => setCreateEmail(e.target.value)} placeholder="email@example.com" />
+            </div>
+            <div>
+              <Label>密码 *</Label>
+              <Input type="password" value={createPassword} onChange={(e) => setCreatePassword(e.target.value)} placeholder="至少8位" />
+            </div>
+            <div>
+              <Label>角色</Label>
+              <Select value={createRole} onValueChange={(v: string | null) => v && setCreateRole(v)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="user">user</SelectItem>
+                  <SelectItem value="admin">admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>配额等级</Label>
+              <Select value={createTier} onValueChange={(v: string | null) => v && setCreateTier(v)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="free">free</SelectItem>
+                  <SelectItem value="basic">basic</SelectItem>
+                  <SelectItem value="pro">pro</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>运行模式</Label>
+              <Select value={createRuntimeMode} onValueChange={(v: string | null) => v && setCreateRuntimeMode(v)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="dedicated">dedicated</SelectItem>
+                  <SelectItem value="shared">shared</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setShowCreate(false); setCreateUsername(""); setCreateEmail(""); setCreatePassword(""); }}>取消</Button>
+            <Button onClick={handleCreateUser}>创建</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

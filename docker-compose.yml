@@ -83,11 +83,16 @@ services:
       PLATFORM_CONTAINER_TZ: ${CONTAINER_TZ:-Asia/Shanghai}
       PLATFORM_CONTAINER_MEMORY_LIMIT: ${PLATFORM_CONTAINER_MEMORY_LIMIT:-2g}
       PLATFORM_CONTAINER_SHM_SIZE: ${PLATFORM_CONTAINER_SHM_SIZE:-1g}
-      PLATFORM_CONTAINER_DATA_DIR: /data/openclaw-users
+      PLATFORM_TRAINING_TRACE_ENABLED: ${PLATFORM_TRAINING_TRACE_ENABLED:-false}
+      PLATFORM_TRAINING_TRACE_INGEST_ENABLED: ${PLATFORM_TRAINING_TRACE_INGEST_ENABLED:-false}
+      PLATFORM_TRAINING_TRACE_INGEST_TOKEN: ${PLATFORM_TRAINING_TRACE_INGEST_TOKEN:-}
+      PLATFORM_TRAINING_TRACE_DIR: ${PLATFORM_TRAINING_TRACE_DIR:-/app/.hermes/training_traces}
+      PLATFORM_TRAINING_TRACE_HASH_SALT: ${PLATFORM_TRAINING_TRACE_HASH_SALT:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # Docker API access for container management
-      - userdata:/data/openclaw-users
       - ./.hermes/benchmarks:/app/.hermes/benchmarks:ro
+      - ./.hermes/training_traces:/app/.hermes/training_traces
+#      - ./deploy_copy/ssh:/root/.ssh:ro  # SSH key for private Git repos (skills marketplace)
     networks:
       - openclaw-internal   # talk to postgres + user containers
       - openclaw-external   # accept traffic from frontend / public
@@ -112,11 +117,13 @@ services:
     container_name: openclaw-shared
     image: ${PLATFORM_HERMES_IMAGE:-nanobot-hermes-agent:latest}
     command: ["gateway", "run"]
+    ports: ["18080:8080"]
     environment:
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_PORT: 8080
       API_SERVER_KEY: ${PLATFORM_SHARED_HERMES_API_KEY:-dev-hermes-bridge-key}
+      API_SERVER_CORS_ORIGINS: "*"
       HERMES_API_TOOLSETS: ${PLATFORM_HERMES_API_TOOLSETS:-terminal,file,skills}
       HERMES_REASONING_EFFORT: ${PLATFORM_HERMES_REASONING_EFFORT:-none}
       HERMES_SERVICE_TIER: ${PLATFORM_HERMES_SERVICE_TIER:-}
@@ -181,5 +188,4 @@ networks:
 
 volumes:
   pgdata:
-  userdata:
   shared_openclaw_data:
