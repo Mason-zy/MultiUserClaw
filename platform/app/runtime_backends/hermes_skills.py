@@ -312,3 +312,67 @@ def list_skills_from_hermes_container(container_id_or_name: str | None) -> list[
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict) and item.get("name")]
+
+
+def _validate_skill_path(skill_name: str) -> str:
+    """Validate and return the full container path for a skill name (may contain /)."""
+    normalized = posixpath.normpath(skill_name)
+    if normalized.startswith("/") or ".." in normalized.split("/"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid skill name")
+    return posixpath.join(HERMES_SKILLS_ROOT, normalized)
+
+
+def delete_skill_from_hermes_container(container_id_or_name: str | None, skill_name: str) -> dict:
+    if not container_id_or_name:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Hermes runtime container is unavailable")
+
+    skill_path = _validate_skill_path(skill_name)
+    try:
+        container = get_docker_container(container_id_or_name)
+        result = container.exec_run(["rm", "-rf", skill_path])
+        exit_code, _ = _exec_output(result)
+    except DockerNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Hermes runtime container is unavailable") from exc
+    except DockerAPIError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete skill") from exc
+
+    if exit_code != 0:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete skill")
+    return {"ok": True, "name": skill_name}
+
+
+def download_skill_from_hermes_container(container_id_or_name: str | None, skill_name: str) -> bytes:
+    """Download a skill directory from the container as a zip file."""
+    if not container_id_or_name:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Hermes runtime container is unavailable")
+
+    skill_path = _validate_skill_path(skill_name)
+    try:
+        container = get_docker_container(container_id_or_name)
+        # Check skill exists
+        result = container.exec_run(["test", "-d", skill_path])
+        exit_code, _ = _exec_output(result)
+        if exit_code != 0:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Skill '{skill_name}' not found")
+        # Get tar archive from container
+        bits, _ = container.get_archive(skill_path)
+    except DockerNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Hermes runtime container is unavailable") from exc
+    except DockerAPIError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to download skill") from exc
+
+    # Convert tar to zip
+    tar_data = b"".join(bits)
+    zip_buffer = io.BytesIO()
+    with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r") as tar, \
+         zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            f = tar.extractfile(member)
+            if f is None:
+                continue
+            # Strip leading directory from path (container returns skill_name/...)
+            zf.writestr(member.name, f.read())
+    zip_buffer.seek(0)
+    return zip_buffer.read()

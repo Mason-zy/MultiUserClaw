@@ -95,6 +95,54 @@ async def search_dedicated_skills(
     return {"results": results, "runtime": "hermes"}
 
 
+@router.get("/api/openclaw/marketplaces/recommended")
+async def list_recommended_skills(
+    user: User = Depends(get_current_user),
+):
+    _ = user
+    try:
+        categories = load_recommended_skills()
+    except Exception as exc:
+        return {"categories": [], "error": str(exc)}
+    return {"categories": categories}
+
+
+class RecommendedSkillInstallRequest(BaseModel):
+    category: str
+    skillName: str
+
+
+@router.post("/api/openclaw/marketplaces/recommended/install")
+async def install_recommended_skill(
+    req: RecommendedSkillInstallRequest,
+    user: User = Depends(get_current_user),
+):
+    from app.container.manager import get_docker_container
+    from app.runtime_backends.hermes_skills import HERMES_SKILLS_ROOT, _build_skills_archive
+
+    try:
+        skill_dir = resolve_recommended_skill_dir(req.category, req.skillName)
+    except FileNotFoundError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    # Read all files from the skill directory
+    files: dict[str, bytes] = {}
+    for file_path in skill_dir.rglob("*"):
+        if file_path.is_file():
+            rel = str(file_path.relative_to(skill_dir)).replace("\\", "/")
+            files[rel] = file_path.read_bytes()
+
+    # Build tar archive and put into container
+    archive = _build_skills_archive({req.skillName: files})
+    async with async_session() as db:
+        container_info = await ensure_running(db, user.id)
+    container = get_docker_container(container_info.docker_id)
+    container.exec_run(["mkdir", "-p", HERMES_SKILLS_ROOT])
+    container.put_archive(HERMES_SKILLS_ROOT, archive)
+
+    return {"ok": True, "name": req.skillName}
+
+
 @router.post("/api/openclaw/runtime/prewarm")
 async def prewarm_dedicated_runtime(
     user: User = Depends(get_current_user),
