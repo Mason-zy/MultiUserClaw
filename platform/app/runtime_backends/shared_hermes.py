@@ -416,3 +416,28 @@ class SharedHermesBackend(RuntimeBackend):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    async def respond_run_approval(
+        self,
+        ctx: RuntimeContext,
+        run_id: str,
+        choice: str,
+        resolve_all: bool = False,
+    ) -> dict | list | str:
+        async with async_session() as db:
+            await self._context_for_user(db, ctx.user)
+            await ensure_runtime_run_owned(
+                db,
+                run_id=run_id,
+                user_id=ctx.user.id,
+                runtime_mode="shared",
+                backend="hermes",
+            )
+
+        payload = await self._request(
+            "POST",
+            f"/v1/runs/{run_id}/approval",
+            json={"choice": choice, "resolve_all": resolve_all},
+            timeout=10.0,
+        )
+        return payload if isinstance(payload, (dict, list, str)) else {"ok": True}

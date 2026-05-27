@@ -47,6 +47,12 @@ class HermesEventSanitizer:
         event_type = event.get("type") or event.get("event")
         sanitized = dict(event)
 
+        if event_type == "reasoning.available":
+            text = event.get("text") or event.get("preview") or ""
+            if isinstance(text, str):
+                sanitized["text"] = strip_thinking_blocks(text) or "正在分析任务并规划下一步"
+            return sanitized
+
         if isinstance(event_type, str) and event_type.startswith("reasoning."):
             return None
 
@@ -61,7 +67,11 @@ class HermesEventSanitizer:
             return sanitized
 
         if event_type == "message.completed" and isinstance(event.get("message"), dict):
-            sanitized["message"] = sanitize_hermes_message(event["message"])
+            message = sanitize_hermes_message(event["message"])
+            content = message.get("content")
+            if message.get("role") == "assistant" and isinstance(content, str) and is_tool_result_content(content):
+                return None
+            sanitized["message"] = message
             return sanitized
 
         if event_type == "run.completed":
@@ -121,6 +131,48 @@ def strip_thinking_blocks(text: str) -> str:
     return HermesEventSanitizer().filter_delta(text)
 
 
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def is_tool_result_content(text: str) -> bool:
+    parsed = _parse_json_object(text)
+    if parsed is None:
+        return False
+    return (
+        ("output" in parsed and ("exit_code" in parsed or "approval" in parsed or "error" in parsed))
+        or ("exit_code" in parsed and ("stdout" in parsed or "stderr" in parsed))
+    )
+
+
+def is_processing_prelude_content(text: str) -> bool:
+    normalized = " ".join(text.strip().split()).lower()
+    if not normalized:
+        return True
+    prelude_prefixes = (
+        "let me check",
+        "i'll check",
+        "i will check",
+        "i’m going to check",
+        "i am going to check",
+        "checking ",
+        "好的，我来查",
+        "好的老板，我查",
+        "我来查一下",
+        "我先查一下",
+        "先查一下",
+        "查一下",
+    )
+    return any(normalized.startswith(prefix) for prefix in prelude_prefixes)
+
+
 def sanitize_hermes_message(message: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(message)
     if sanitized.get("role") == "assistant":
@@ -132,7 +184,17 @@ def sanitize_hermes_message(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def sanitize_hermes_messages(messages: list[Any]) -> list[Any]:
-    return [sanitize_hermes_message(message) if isinstance(message, dict) else message for message in messages]
+    sanitized_messages: list[Any] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            sanitized_messages.append(message)
+            continue
+        sanitized = sanitize_hermes_message(message)
+        content = sanitized.get("content")
+        if sanitized.get("role") == "assistant" and isinstance(content, str) and is_tool_result_content(content):
+            continue
+        sanitized_messages.append(sanitized)
+    return sanitized_messages
 
 
 def sanitize_run_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -175,7 +237,10 @@ def summarize_run_events(events: list[dict[str, Any]]) -> tuple[str, dict[str, A
             continue
         event_type = event.get("type")
         if event_type == "message.completed" and isinstance(event.get("message"), dict):
-            final_message = sanitize_hermes_message(event["message"])
+            candidate = sanitize_hermes_message(event["message"])
+            content = candidate.get("content")
+            if not (isinstance(content, str) and is_tool_result_content(content)):
+                final_message = candidate
         if event_type == "run.completed":
             status_text = "completed"
             if not final_message:

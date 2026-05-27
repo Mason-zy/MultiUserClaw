@@ -32,6 +32,7 @@ from app.runtime_backends.hermes_knowledge import (
     list_knowledge_pages,
     read_knowledge_page,
     search_knowledge_pages,
+    write_knowledge_page,
 )
 from app.runtime_backends.hermes_skills import (
     delete_skill_from_hermes_container,
@@ -41,6 +42,7 @@ from app.runtime_backends.hermes_skills import (
     list_skills_from_hermes_container,
     read_skill_file_from_hermes_container,
     scan_git_skills,
+    set_skill_disabled_in_hermes_container,
     skill_scopes,
     skill_zip_from_hermes_container,
     upload_skill_zip_to_hermes_container,
@@ -77,6 +79,12 @@ class WriteFileRequest(BaseModel):
     content: str
 
 
+class WriteKnowledgeRequest(BaseModel):
+    path: str
+    content: str
+    agentId: str | None = None
+
+
 class WriteAgentFileRequest(BaseModel):
     content: str
 
@@ -85,11 +93,22 @@ class TitleSummaryRequest(BaseModel):
     message: str = ""
 
 
+class ApprovalRequest(BaseModel):
+    choice: str
+    resolveAll: bool = False
+
+
 class SkillFileWriteRequest(BaseModel):
     scope: str = "global"
     agentId: str | None = None
     path: str
     content: str
+
+
+class SkillToggleRequest(BaseModel):
+    scope: str = "global"
+    agentId: str | None = None
+    disabled: bool
 
 
 class SkillSearchRequest(BaseModel):
@@ -274,6 +293,17 @@ async def delete_dedicated_skill(
     async with async_session() as db:
         container = await ensure_running(db, user.id)
     return delete_skill_from_hermes_container(container.docker_id, skill_name, scope, agentId)
+
+
+@router.put("/api/openclaw/skills/{skill_name}/disabled")
+async def set_dedicated_skill_disabled(
+    skill_name: str,
+    req: SkillToggleRequest,
+    user: User = Depends(get_current_user),
+):
+    async with async_session() as db:
+        container = await ensure_running(db, user.id)
+    return set_skill_disabled_in_hermes_container(container.docker_id, skill_name, req.disabled, req.scope, req.agentId)
 
 
 @router.get("/api/openclaw/skills/{skill_name}/download")
@@ -523,6 +553,21 @@ async def abort_dedicated_run(
     return await backend.abort_run(RuntimeContext(user=user, scope="dedicated"), run_id, session_key)
 
 
+@router.post("/api/openclaw/runs/{run_id}/approval")
+async def respond_dedicated_run_approval(
+    run_id: str,
+    req: ApprovalRequest,
+    user: User = Depends(get_current_user),
+):
+    backend = get_runtime_backend(user)
+    return await backend.respond_run_approval(
+        RuntimeContext(user=user, scope="dedicated"),
+        run_id,
+        req.choice,
+        resolve_all=req.resolveAll,
+    )
+
+
 @router.post("/api/openclaw/sessions/{session_key:path}/abort-active")
 async def abort_dedicated_active_session(
     session_key: str,
@@ -581,6 +626,16 @@ async def graph_dedicated_knowledge(
     async with async_session() as db:
         container = await ensure_running(db, user.id)
     return knowledge_graph(container.docker_id, agentId)
+
+
+@router.put("/api/openclaw/knowledge/write")
+async def write_dedicated_knowledge(
+    req: WriteKnowledgeRequest,
+    user: User = Depends(get_current_user),
+):
+    async with async_session() as db:
+        container = await ensure_running(db, user.id)
+    return write_knowledge_page(container.docker_id, req.agentId or "main", req.path, req.content)
 
 
 @router.post("/api/openclaw/filemanager/upload")
@@ -713,6 +768,21 @@ async def shared_run_events_stream(
     user = User(id="", username="", email="", password_hash="", runtime_mode="shared")
     backend = get_runtime_backend(user)
     return await backend.stream_run_events(RuntimeContext(user=user, scope="shared"), request, token, run_id)
+
+
+@router.post("/api/shared-openclaw/runs/{run_id}/approval")
+async def respond_shared_run_approval(
+    run_id: str,
+    req: ApprovalRequest,
+    user: User = Depends(get_current_user),
+):
+    backend = get_runtime_backend(user)
+    return await backend.respond_run_approval(
+        RuntimeContext(user=user, scope="shared"),
+        run_id,
+        req.choice,
+        resolve_all=req.resolveAll,
+    )
 
 
 @router.put("/api/shared-openclaw/sessions/{session_key:path}/title")

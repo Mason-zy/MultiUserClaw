@@ -81,6 +81,20 @@ class SharedOpenClawBackend(RuntimeBackend):
     async def wait_run(self, ctx: RuntimeContext, run_id: str, timeout_ms: int):
         return await shared_runtime_request("GET", f"/api/runs/{run_id}/wait", params={"timeoutMs": timeout_ms}, timeout=(timeout_ms / 1000) + 5)
 
+    async def respond_run_approval(
+        self,
+        ctx: RuntimeContext,
+        run_id: str,
+        choice: str,
+        resolve_all: bool = False,
+    ):
+        return await shared_runtime_request(
+            "POST",
+            f"/api/runs/{run_id}/approval",
+            json={"choice": choice, "resolve_all": resolve_all},
+            timeout=10,
+        )
+
     async def rename_session(self, ctx: RuntimeContext, session_key: str, title: str):
         async with async_session() as db:
             shared_ctx = await self._context_for_user(db, ctx.user)

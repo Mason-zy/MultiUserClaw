@@ -36,6 +36,7 @@ import {
   listSkills,
   scanGitSkills,
   searchSkills,
+  setSkillDisabled,
   uploadSkillZip,
   writeManagedFile,
   writeSkillFile,
@@ -48,7 +49,7 @@ type SkillsCache = { scopes: SkillScope[]; skills: SkillInfo[]; at: number }
 let skillsCache: SkillsCache | null = null
 
 const builtinAgentNames: Record<string, string> = {
-  main: '默认',
+  main: '主助手',
   manager: '经理',
   programmer: '程序员',
   researcher: '研究员',
@@ -177,6 +178,7 @@ export default function SkillStore() {
   const [searchResults, setSearchResults] = useState<SkillSearchResult[]>([])
   const [installing, setInstalling] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [togglingSkillKey, setTogglingSkillKey] = useState('')
   const [activeModal, setActiveModal] = useState<'search' | 'git' | null>(null)
   const [gitUrl, setGitUrl] = useState('')
   const [gitScanning, setGitScanning] = useState(false)
@@ -264,7 +266,7 @@ export default function SkillStore() {
       ...skill,
       scope: scope?.id || skill.scope || source,
       scopeType,
-      scopeLabel: scope?.label || (scopeType === 'builtin' ? '内置技能' : scopeType === 'agent' ? '默认的技能' : '全局技能'),
+      scopeLabel: scope?.label || (scopeType === 'builtin' ? '内置技能' : scopeType === 'agent' ? '主助手的技能' : '全局技能'),
       agentId: scopeType === 'agent' ? scope?.agentId || skill.agentId || 'main' : undefined,
       writable: scope?.writable ?? scopeType !== 'builtin',
       dirPath: skill.dirPath || skill.path.replace(/[\\/]+SKILL\.md$/, ''),
@@ -457,6 +459,29 @@ export default function SkillStore() {
     }
   }
 
+  const handleToggleSkill = async (skill: SkillInfo, nextEnabled: boolean) => {
+    const key = `${skill.scope}:${skill.name}`
+    setTogglingSkillKey(key)
+    try {
+      await setSkillDisabled(skill, !nextEnabled)
+      setSkills(current => {
+        const nextSkills = current.map(item => item.scope === skill.scope && item.name === skill.name
+          ? { ...item, disabled: !nextEnabled }
+          : item)
+        writeSkillsCache({ scopes, skills: nextSkills, at: Date.now() })
+        return nextSkills
+      })
+      setSelectedSkill(current => current && current.scope === skill.scope && current.name === skill.name
+        ? { ...current, disabled: !nextEnabled }
+        : current)
+      toast.success(nextEnabled ? `已启用 ${skill.name}` : `已停用 ${skill.name}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '更新技能状态失败')
+    } finally {
+      setTogglingSkillKey('')
+    }
+  }
+
   const openInstallModal = (modal: 'search' | 'git') => {
     if (!canInstallToSelectedScope) return
     setActiveModal(modal)
@@ -542,8 +567,8 @@ export default function SkillStore() {
                 <Sparkles size={22} />
               </span>
               <div>
-                <h1 className="text-2xl font-bold leading-tight tracking-normal text-light-text sm:text-[28px]">技能商店</h1>
-                <p className="mt-1 text-sm text-light-text-secondary">查看各 Agent、全局和内置技能，并安装、导入、编辑技能文件</p>
+                <h1 className="text-2xl font-bold leading-tight tracking-normal text-light-text sm:text-[28px]">技能</h1>
+                <p className="mt-1 text-sm text-light-text-secondary">管理已安装技能，并从商店安装、导入新的技能</p>
               </div>
             </div>
           </div>
@@ -679,10 +704,31 @@ export default function SkillStore() {
                             <Package size={18} />
                           </span>
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-semibold text-light-text">{skill.name}</span>
+                            <span className="flex min-w-0 items-center gap-2">
+                              <span className="block truncate text-sm font-semibold text-light-text">{skill.name}</span>
+                              {skill.disabled && <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-light-text-secondary">已停用</span>}
+                            </span>
                             <span className="mt-1 line-clamp-2 text-xs leading-5 text-light-text-secondary">{skill.description || '暂无描述'}</span>
                           </span>
                         </div>
+                        <button
+                          type="button"
+                          onClick={event => {
+                            event.stopPropagation()
+                            void handleToggleSkill(skill, skill.disabled)
+                          }}
+                          disabled={!skill.writable || togglingSkillKey === `${skill.scope}:${skill.name}`}
+                          className={`mt-4 inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border p-0.5 transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                            skill.disabled
+                              ? 'border-light-border bg-slate-100'
+                              : 'border-accent-blue/30 bg-accent-blue/10'
+                          }`}
+                          aria-label={skill.disabled ? `启用 ${skill.name}` : `停用 ${skill.name}`}
+                          title={!skill.writable ? '只读技能不能切换状态' : skill.disabled ? '启用技能' : '停用技能'}
+                        >
+                          <span className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${skill.disabled ? 'translate-x-0' : 'translate-x-5'}`} />
+                          <span className="sr-only">{skill.disabled ? '已停用' : '已启用'}</span>
+                        </button>
                       </div>
                     ))}
                   </div>

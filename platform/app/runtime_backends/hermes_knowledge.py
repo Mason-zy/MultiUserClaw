@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import shlex
 import textwrap
 
 from docker.errors import NotFound as DockerNotFound
 from fastapi import HTTPException, status
 
 from app.container.manager import get_docker_container
-from app.runtime_backends.hermes_files import HERMES_DATA_ROOT, _exec_output
+from app.runtime_backends.hermes_files import HERMES_DATA_ROOT, _exec_output, chown_hermes_path, write_hermes_filemanager_file
 
 
 def _safe_agent_id(agent_id: str | None) -> str:
@@ -21,6 +22,30 @@ def _safe_agent_id(agent_id: str | None) -> str:
 
 def knowledge_root_for_agent(agent_id: str | None) -> str:
     return f"profiles/{_safe_agent_id(agent_id)}/workspace/knowledge"
+
+
+def _safe_knowledge_page_path(page_path: str) -> str:
+    normalized = posixpath.normpath((page_path or "").strip().replace("\\", "/").lstrip("/"))
+    if (
+        normalized in {"", ".", ".."}
+        or normalized.startswith("../")
+        or not normalized.lower().endswith(".md")
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Knowledge page path is unavailable")
+    return normalized
+
+
+def ensure_knowledge_root(container, agent_id: str | None) -> str:
+    root = f"{HERMES_DATA_ROOT}/{knowledge_root_for_agent(agent_id)}"
+    result = container.exec_run(["sh", "-lc", f"mkdir -p -- {shlex.quote(root)}"], user="root")
+    exit_code, output = _exec_output(result)
+    if exit_code != 0:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=output.decode("utf-8", errors="replace") or "Failed to prepare knowledge root",
+        )
+    chown_hermes_path(container, root)
+    return root
 
 
 def _knowledge_script() -> str:
@@ -309,6 +334,7 @@ def _run_knowledge_action(
     except DockerNotFound as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Hermes runtime container is unavailable") from exc
 
+    ensure_knowledge_root(container, safe_agent)
     result = container.exec_run(["python3", "-c", _knowledge_script(), safe_agent, action, query or "", page_path or ""])
     exit_code, output = _exec_output(result)
     if exit_code != 0:
@@ -342,6 +368,22 @@ def search_knowledge_pages(container_id_or_name: str | None, agent_id: str | Non
 
 def knowledge_graph(container_id_or_name: str | None, agent_id: str | None) -> dict:
     return _run_knowledge_action(container_id_or_name, agent_id, "graph")
+
+
+def write_knowledge_page(container_id_or_name: str | None, agent_id: str | None, page_path: str, content: str) -> dict:
+    if not container_id_or_name:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Hermes runtime container is unavailable")
+    safe_agent = _safe_agent_id(agent_id)
+    safe_path = _safe_knowledge_page_path(page_path)
+    try:
+        container = get_docker_container(container_id_or_name)
+    except DockerNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Hermes runtime container is unavailable") from exc
+
+    ensure_knowledge_root(container, safe_agent)
+    storage_path = f"{knowledge_root_for_agent(safe_agent)}/{safe_path}"
+    write_hermes_filemanager_file(container_id_or_name, storage_path, content)
+    return read_knowledge_page(container_id_or_name, safe_agent, safe_path)
 
 
 def build_knowledge_context(

@@ -195,10 +195,26 @@ export interface SessionDetail {
 
 export interface AgentRunWaitResult {
   runId: string
-  status: 'ok' | 'error' | 'timeout'
+  status: 'ok' | 'completed' | 'error' | 'failed' | 'aborted' | 'cancelled' | 'timeout'
   startedAt: number | null
   endedAt: number | null
   error: unknown
+}
+
+export interface SlashCommandInfo {
+  name: string
+  description: string
+  argument_hint: string | null
+  aliases: string[]
+  category: string
+  scope: 'text' | 'native' | 'both'
+  source: 'builtin' | 'skill'
+  skill_name: string | null
+}
+
+export interface SlashCommandsResult {
+  agentId: string
+  commands: SlashCommandInfo[]
 }
 
 export interface FileEntry {
@@ -740,14 +756,45 @@ export async function sendChatMessage(
   return result
 }
 
+export async function listSlashCommands(agentId?: string): Promise<SlashCommandsResult> {
+  const params = agentId ? `?agentId=${encodeURIComponent(agentId)}` : ''
+  return fetchJSON<SlashCommandsResult>(`/api/openclaw/commands${params}`)
+}
+
 export async function waitForAgentRun(
   runId: string,
   timeoutMs = 25000,
 ): Promise<AgentRunWaitResult> {
   const params = new URLSearchParams({ timeoutMs: String(timeoutMs) })
-  return fetchJSON<AgentRunWaitResult>(
-    `/api/openclaw/runs/${encodeURIComponent(runId)}/wait?${params.toString()}`,
-  )
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs + 5000)
+  try {
+    return await fetchJSON<AgentRunWaitResult>(
+      `/api/openclaw/runs/${encodeURIComponent(runId)}/wait?${params.toString()}`,
+      { signal: controller.signal },
+    )
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      return {
+        runId,
+        status: 'timeout',
+        startedAt: null,
+        endedAt: null,
+        error: null,
+      }
+    }
+    throw err
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
+}
+
+export function getRunEventsStreamUrl(runId: string): string {
+  const token = getAccessToken()
+  const params = new URLSearchParams()
+  if (token) params.set('token', token)
+  const suffix = params.toString()
+  return `/api/openclaw/runs/${encodeURIComponent(runId)}/events${suffix ? `?${suffix}` : ''}`
 }
 
 export async function abortAgentRun(
@@ -758,6 +805,19 @@ export async function abortAgentRun(
     method: 'POST',
     body: JSON.stringify({ sessionKey }),
   })
+}
+
+export async function respondRunApproval(
+  runId: string,
+  choice: string,
+): Promise<{ run_id?: string; choice?: string; resolved?: number }> {
+  return fetchJSON<{ run_id?: string; choice?: string; resolved?: number }>(
+    `/api/openclaw/runs/${encodeURIComponent(runId)}/approval`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ choice }),
+    },
+  )
 }
 
 export async function abortActiveSessionRun(sessionKey: string): Promise<{ ok?: boolean }> {
@@ -1000,6 +1060,26 @@ export async function deleteSkill(skill: SkillInfo): Promise<void> {
       writable: skill.writable,
     })}`,
     { method: 'DELETE' },
+  )
+}
+
+export async function setSkillDisabled(skill: SkillInfo, disabled: boolean): Promise<{ ok?: boolean; name?: string; disabled: boolean }> {
+  return fetchJSON<{ ok?: boolean; name?: string; disabled: boolean }>(
+    `/api/openclaw/skills/${encodeURIComponent(skill.name)}/disabled`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        ...skillTargetBody({
+          id: skill.scope,
+          type: skill.scopeType,
+          label: skill.scopeLabel,
+          path: '',
+          agentId: skill.agentId,
+          writable: skill.writable,
+        }),
+        disabled,
+      }),
+    },
   )
 }
 

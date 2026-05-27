@@ -88,7 +88,7 @@ if root.exists():
                 "name": name,
                 "description": meta.get("description", ""),
                 "source": "hermes",
-                "disabled": False,
+                "disabled": (skill_file.parent / ".openclaw-disabled").exists(),
                 "path": str(rel.parent),
                 "fingerprint": fingerprint,
             }
@@ -690,6 +690,36 @@ shutil.rmtree(target)
 print('{"ok": true}')
 """
     return _exec_json(container_id_or_name, script, root, skill)
+
+
+def set_skill_disabled_in_hermes_container(
+    container_id_or_name: str | None,
+    skill_name: str,
+    disabled: bool,
+    scope: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    skill = _safe_skill_name(skill_name)
+    root = _scope_root(scope, agent_id)
+    script = _RESOLVE_SKILL_SCRIPT + r"""
+import json, os, sys
+root, skill, disabled_value = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+target = resolve_skill_dir(root, skill)
+root_real = os.path.realpath(root)
+if not target or not target.startswith(root_real + os.sep):
+    raise SystemExit("skill not found")
+marker = os.path.join(target, ".openclaw-disabled")
+if disabled_value:
+    with open(marker, "w", encoding="utf-8") as handle:
+        handle.write("disabled\n")
+else:
+    try:
+        os.remove(marker)
+    except FileNotFoundError:
+        pass
+print(json.dumps({"ok": True, "name": skill, "disabled": disabled_value}))
+"""
+    return _exec_json(container_id_or_name, script, root, skill, "1" if disabled else "0")
 
 
 def list_skill_files_from_hermes_container(container_id_or_name: str | None, skill_name: str, scope: str | None = None, agent_id: str | None = None) -> dict:

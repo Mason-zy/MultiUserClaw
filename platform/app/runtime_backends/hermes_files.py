@@ -19,6 +19,9 @@ HERMES_DATA_ROOT = "/opt/data"
 HERMES_DATA_ROOTS = (HERMES_DATA_ROOT, "/workspace")
 SHARED_HERMES_CONTAINER_NAME = "openclaw-shared"
 _HERMES_PROFILE_PREFIX = "profiles/"
+HERMES_USER = "hermes"
+HERMES_UID = 10000
+HERMES_GID = 10000
 
 
 def _exec_output(result) -> tuple[int, bytes]:
@@ -30,6 +33,25 @@ def _exec_output(result) -> tuple[int, bytes]:
     if isinstance(output, str):
         output = output.encode("utf-8")
     return int(exit_code or 0), output or b""
+
+
+def _mark_hermes_owned(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    info.uid = HERMES_UID
+    info.gid = HERMES_GID
+    info.uname = HERMES_USER
+    info.gname = HERMES_USER
+    return info
+
+
+def chown_hermes_path(container, absolute_path: str) -> None:
+    quoted = shlex.quote(absolute_path)
+    result = container.exec_run(["sh", "-lc", f"chown -R hermes:hermes -- {quoted}"], user="root")
+    exit_code, output = _exec_output(result)
+    if exit_code != 0:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=output.decode("utf-8", errors="replace") or "Failed to repair Hermes file ownership",
+        )
 
 
 def _normalize_profile_storage_path(path: str, default_agent: str = "main") -> str:
@@ -273,13 +295,17 @@ def make_hermes_filemanager_directory(container_id_or_name: str | None, requeste
             detail="Hermes runtime container is unavailable",
         ) from exc
     absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
-    result = container.exec_run(["sh", "-lc", f"mkdir -p -- {shlex.quote(absolute_path)}"])
+    result = container.exec_run(["sh", "-lc", f"mkdir -p -- {shlex.quote(absolute_path)}"], user=HERMES_USER)
     exit_code, output = _exec_output(result)
     if exit_code != 0:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=output.decode("utf-8", errors="replace") or "Failed to create Hermes directory",
-        )
+        result = container.exec_run(["sh", "-lc", f"mkdir -p -- {shlex.quote(absolute_path)}"], user="root")
+        exit_code, output = _exec_output(result)
+        if exit_code != 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=output.decode("utf-8", errors="replace") or "Failed to create Hermes directory",
+            )
+    chown_hermes_path(container, absolute_path)
     return {"ok": True, "path": storage_path, "runtime": "hermes"}
 
 
@@ -306,6 +332,7 @@ def write_hermes_filemanager_file(container_id_or_name: str | None, requested_pa
     try:
         _ensure_openclaw_compat_links(container)
         ok = container.put_archive(HERMES_DATA_ROOT, archive)
+        chown_hermes_path(container, f"{HERMES_DATA_ROOT}/{posixpath.dirname(storage_path)}")
     except DockerAPIError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to write Hermes file") from exc
     if not ok:
@@ -401,14 +428,14 @@ def _build_upload_archive(relative_path: str, contents: bytes) -> bytes:
         home_dir.type = tarfile.DIRTYPE
         home_dir.mode = 0o755
         home_dir.mtime = now
-        tar.addfile(home_dir)
+        tar.addfile(_mark_hermes_owned(home_dir))
 
         openclaw_link = tarfile.TarInfo(name="home/.openclaw")
         openclaw_link.type = tarfile.SYMTYPE
         openclaw_link.linkname = HERMES_DATA_ROOT
         openclaw_link.mode = 0o777
         openclaw_link.mtime = now
-        tar.addfile(openclaw_link)
+        tar.addfile(_mark_hermes_owned(openclaw_link))
 
         current_dir = ""
         for part in upload_dir.split("/"):
@@ -419,13 +446,13 @@ def _build_upload_archive(relative_path: str, contents: bytes) -> bytes:
             directory.type = tarfile.DIRTYPE
             directory.mode = 0o755
             directory.mtime = now
-            tar.addfile(directory)
+            tar.addfile(_mark_hermes_owned(directory))
 
         upload_file = tarfile.TarInfo(name=relative_path)
         upload_file.size = len(contents)
         upload_file.mode = 0o644
         upload_file.mtime = now
-        tar.addfile(upload_file, io.BytesIO(contents))
+        tar.addfile(_mark_hermes_owned(upload_file), io.BytesIO(contents))
 
     tar_buffer.seek(0)
     return tar_buffer.read()
@@ -471,6 +498,7 @@ async def write_upload_to_hermes_container(
         container = get_docker_container(container_id_or_name)
         _ensure_openclaw_compat_links(container)
         ok = container.put_archive(HERMES_DATA_ROOT, archive)
+        chown_hermes_path(container, f"{HERMES_DATA_ROOT}/{upload_dir}")
     except DockerNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

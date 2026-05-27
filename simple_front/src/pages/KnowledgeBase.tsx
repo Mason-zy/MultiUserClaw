@@ -16,6 +16,7 @@ import {
   GitBranch,
   Link,
   Loader2,
+  PencilLine,
   RefreshCw,
   Save,
   Search,
@@ -65,7 +66,7 @@ const t = {
   hint: '\u63d0\u793a\uff1a',
   hintBody: '\u5f53\u524d\u7248\u672c\u4f1a\u7d22\u5f15 Markdown \u6587\u4ef6\u3002\u666e\u901a\u4e0a\u4f20\u6587\u4ef6\u4ecd\u4f1a\u4fdd\u5b58\uff0c`.md` \u6587\u6863\u4f1a\u8fdb\u5165\u641c\u7d22\u3001\u53cd\u94fe\u548c\u804a\u5929\u53ec\u56de\u3002',
   chooseAgent: '\u9009\u62e9 Agent',
-  defaultAgent: '\u9ed8\u8ba4',
+  defaultAgent: '\u4e3b\u52a9\u624b',
   search: '\u641c\u7d22\u77e5\u8bc6\u5e93',
   noMatch: '\u6ca1\u6709\u5339\u914d\u7ed3\u679c',
   retry: '\u91cd\u8bd5',
@@ -76,7 +77,9 @@ const t = {
   editDoc: '\u7f16\u8f91\u6587\u6863',
   downloadDoc: '\u4e0b\u8f7d\u6587\u6863',
   deleteDoc: '\u5220\u9664\u6587\u6863',
+  deleteFolder: '\u5220\u9664\u6587\u4ef6\u5939',
   deleteTitle: '\u5220\u9664\u6587\u6863\uff1f',
+  deleteFolderTitle: '\u5220\u9664\u6587\u4ef6\u5939\uff1f',
   deleteConfirm: '\u5220\u9664',
   reading: '\u6b63\u5728\u8bfb\u53d6\u6587\u6863',
   loadingGraph: '\u6b63\u5728\u52a0\u8f7d\u56fe\u8c31',
@@ -94,6 +97,9 @@ const t = {
   editDialog: '\u7f16\u8f91\u77e5\u8bc6\u5e93\u6587\u6863',
   closeEditor: '\u5173\u95ed\u7f16\u8f91\u5668',
   unsaved: '\u672a\u4fdd\u5b58',
+  unsavedChanges: '\u6709\u672a\u4fdd\u5b58\u7684\u6539\u52a8\uff0c\u8bf7\u5148\u4fdd\u5b58\u540e\u518d\u5173\u95ed\u3002',
+  lastSaved: '\u4e0a\u6b21\u4fdd\u5b58',
+  notSavedYet: '\u5c1a\u672a\u4fdd\u5b58',
   save: '\u4fdd\u5b58',
   cancel: '\u53d6\u6d88',
   create: '\u521b\u5efa',
@@ -133,6 +139,14 @@ type TreeNode = {
   pages: KnowledgePageMeta[]
 }
 
+type EditorFileState = {
+  path: string
+  name: string
+  content: string
+  originalContent: string
+  lastSavedAt: string | null
+}
+
 function trimSlashes(value: string): string {
   return value.replace(/[\\/]+$/, '')
 }
@@ -165,6 +179,13 @@ function formatDate(iso?: string | null): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function formatDateTime(iso?: string | null): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
 }
 
 function normalizeWikiToken(value: string): string {
@@ -276,15 +297,23 @@ export default function KnowledgeBase() {
   const [newFolderName, setNewFolderName] = useState('')
   const [newDocName, setNewDocName] = useState('')
   const [deletingPath, setDeletingPath] = useState<string | null>(null)
-  const [editorFile, setEditorFile] = useState<{ path: string; name: string; content: string; originalContent: string } | null>(null)
+  const [editorFile, setEditorFile] = useState<EditorFileState | null>(null)
   const [editorSaving, setEditorSaving] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const editorLineNumbersRef = useRef<HTMLDivElement>(null)
   const selectedPathRef = useRef<string | null>(null)
   const knowledgeRequestSeq = useRef(0)
   const pageRequestSeq = useRef(0)
   const toast = useToast()
 
-  const availableAgents = useMemo(() => agents.filter(agent => agent.id), [agents])
+  const availableAgents = useMemo(() => {
+    const list = agents.filter(agent => agent.id)
+    return [...list].sort((a, b) => {
+      if (a.id === 'main') return -1
+      if (b.id === 'main') return 1
+      return getAgentName(a).localeCompare(getAgentName(b), 'zh-Hans')
+    })
+  }, [agents])
   const selectedAgentInfo = availableAgents.find(agent => agent.id === selectedAgent)
   const pages = knowledge?.pages ?? []
   const directories = knowledge?.directories ?? []
@@ -313,6 +342,11 @@ export default function KnowledgeBase() {
     }
     return map
   }, [pages])
+  const editorLineNumbers = useMemo(() => {
+    const lineCount = Math.max(1, (editorFile?.content.match(/\n/g)?.length ?? 0) + 1)
+    return Array.from({ length: lineCount }, (_, index) => index + 1)
+  }, [editorFile?.content])
+  const editorHasUnsavedChanges = Boolean(editorFile && editorFile.content !== editorFile.originalContent)
 
   useEffect(() => {
     if (selectedAgent || availableAgents.length === 0) return
@@ -554,7 +588,13 @@ export default function KnowledgeBase() {
       const result = await browseFiles(path)
       const fileResult = result as BrowseFileResult
       if (fileResult.content === undefined) throw new Error(t.unsupportedEdit)
-      setEditorFile({ path, name: selectedPage.name, content: fileResult.content, originalContent: fileResult.content })
+      setEditorFile({
+        path,
+        name: selectedPage.name,
+        content: fileResult.content,
+        originalContent: fileResult.content,
+        lastSavedAt: selectedPage.updated || selectedPage.modified || null,
+      })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t.readFileFailed)
     } finally {
@@ -567,7 +607,12 @@ export default function KnowledgeBase() {
     setEditorSaving(true)
     try {
       await writeManagedFile(editorFile.path, editorFile.content)
-      setEditorFile(null)
+      const savedAt = new Date().toISOString()
+      setEditorFile(current => current ? {
+        ...current,
+        originalContent: current.content,
+        lastSavedAt: savedAt,
+      } : current)
       await loadKnowledge(selectedAgent, { keepSelection: true })
       if (selectedPath) setPageData(await readKnowledge(selectedAgent, selectedPath))
       toast.success(`${t.saved} ${editorFile.name}`)
@@ -575,6 +620,27 @@ export default function KnowledgeBase() {
       toast.error(err instanceof Error ? err.message : t.saveFailed)
     } finally {
       setEditorSaving(false)
+    }
+  }
+
+  const requestCloseEditor = () => {
+    if (editorHasUnsavedChanges) {
+      toast.error(t.unsavedChanges)
+      return
+    }
+    setEditorFile(null)
+  }
+
+  const handleEditorKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+      event.preventDefault()
+      void handleSaveEditor()
+    }
+  }
+
+  const handleEditorScroll = (event: React.UIEvent<HTMLTextAreaElement>) => {
+    if (editorLineNumbersRef.current) {
+      editorLineNumbersRef.current.scrollTop = event.currentTarget.scrollTop
     }
   }
 
@@ -589,6 +655,25 @@ export default function KnowledgeBase() {
       }
       await loadKnowledge(selectedAgent)
       toast.success(`${t.deleted} ${page.name}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t.deleteFailed)
+    } finally {
+      setDeletingPath(null)
+    }
+  }
+
+  const handleDeleteFolder = async (folderPath: string) => {
+    if (!selectedAgent) return
+    const path = fullPath(selectedAgentInfo, selectedAgent, folderPath)
+    setDeletingPath(path)
+    try {
+      await deleteFile(path)
+      if (selectedPath?.startsWith(`${folderPath}/`)) {
+        setSelectedPath(null)
+        setPageData(null)
+      }
+      await loadKnowledge(selectedAgent)
+      toast.success(`${t.deleted} ${folderPath}`)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t.deleteFailed)
     } finally {
@@ -623,8 +708,8 @@ export default function KnowledgeBase() {
   const resolveWikiPath = (href: string) => pageLookup.get(normalizeWikiToken(decodeURIComponent(href)))
 
   return (
-    <div className="h-full overflow-y-auto bg-light-bg">
-      <div className="flex min-h-full w-full flex-col px-4 py-5 sm:px-5 lg:px-6">
+    <div className="flex h-full min-h-0 overflow-hidden bg-light-bg">
+      <div className="flex min-h-0 w-full flex-col px-4 py-5 sm:px-5 lg:px-6">
         <header className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div>
             <button type="button" onClick={openMobileSidebar} className="mb-3 inline-flex cursor-pointer items-center gap-2 rounded-xl border border-light-border bg-light-card px-3 py-2 text-sm text-light-text-secondary shadow-sm transition-colors hover:bg-light-card-hover hover:text-light-text lg:hidden">
@@ -665,7 +750,7 @@ export default function KnowledgeBase() {
           {t.hintBody}
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[520px_minmax(0,1fr)_300px] 2xl:grid-cols-[560px_minmax(0,1fr)_300px]">
+        <div className="grid min-h-0 flex-1 gap-4 overflow-hidden xl:grid-cols-[520px_minmax(0,1fr)_300px] 2xl:grid-cols-[560px_minmax(0,1fr)_300px]">
           <aside className="grid min-h-0 gap-4 md:grid-cols-[180px_minmax(0,1fr)] xl:grid-cols-[170px_minmax(0,1fr)]">
             <section className="min-h-0 rounded-lg border border-light-border bg-light-card p-3 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-light-text">
@@ -760,7 +845,11 @@ export default function KnowledgeBase() {
                         newDocName={newDocName}
                         onSelect={selectKnowledgePage}
                         onCreateAt={openCreateForm}
+                        onDeletePage={handleDeletePage}
+                        onDeleteFolder={handleDeleteFolder}
                         onToggleFolder={toggleFolder}
+                        deletingPath={deletingPath}
+                        fullPathForNode={(path) => fullPath(selectedAgentInfo, selectedAgent, path)}
                         onFolderNameChange={setNewFolderName}
                         onDocNameChange={setNewDocName}
                         onCreateFolder={handleNewFolder}
@@ -790,7 +879,7 @@ export default function KnowledgeBase() {
             </section>
           </aside>
 
-          <main className="min-h-0 rounded-lg border border-light-border bg-light-card shadow-sm">
+          <main className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-light-border bg-light-card shadow-sm">
             <div className="flex min-h-14 items-center justify-between gap-3 border-b border-light-border px-4 py-3">
               <div className="min-w-0">
                 <h2 className="truncate text-base font-semibold text-light-text">{selectedPage?.title || t.chooseDoc}</h2>
@@ -798,18 +887,13 @@ export default function KnowledgeBase() {
               </div>
               {selectedPage && (
                 <div className="flex shrink-0 items-center gap-1">
-                  <IconButton label={t.editDoc} onClick={() => void handleEditFile()} tone="primary" surface="plain"><FileText size={16} /></IconButton>
+                  <IconButton label={t.editDoc} onClick={() => void handleEditFile()} tone="primary" surface="plain"><PencilLine size={16} /></IconButton>
                   <IconButton label={t.downloadDoc} onClick={() => void handleDownload()} tone="primary" surface="plain"><Download size={16} /></IconButton>
-                  <Popconfirm title={t.deleteTitle} description={`"${selectedPage.name}" will be deleted from the knowledge base.`} confirmText={t.deleteConfirm} danger onConfirm={() => handleDeletePage(selectedPage)}>
-                    <button type="button" disabled={deletingPath === fullPath(selectedAgentInfo, selectedAgent, selectedPage.path)} className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-light-text-secondary transition-colors hover:bg-accent-red/10 hover:text-accent-red disabled:opacity-50" aria-label={t.deleteDoc}>
-                      {deletingPath ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-                    </button>
-                  </Popconfirm>
                 </div>
               )}
             </div>
 
-            <div className="h-[calc(100%-3.5rem)] overflow-y-auto p-4">
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
               {pageLoading ? (
                 <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-light-text-secondary"><Loader2 size={18} className="animate-spin text-accent-blue" />{t.reading}</div>
               ) : pageError ? (
@@ -825,7 +909,7 @@ export default function KnowledgeBase() {
                   <p className="text-sm">{t.emptyAfterCreate}</p>
                 </div>
               ) : (
-                <article className="prose prose-slate max-w-none text-light-text prose-headings:text-light-text prose-a:text-accent-blue prose-code:text-accent-purple">
+                <article className="prose prose-slate max-w-none text-[13px] leading-6 text-slate-600 prose-headings:text-slate-800 prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-p:my-2.5 prose-li:my-0.5 prose-a:text-accent-blue prose-code:rounded prose-code:bg-light-card-hover prose-code:px-1 prose-code:py-0.5 prose-code:text-[12px] prose-code:text-accent-purple">
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
                     a({ href, children }) {
                       if (href?.startsWith('#wiki=')) {
@@ -845,7 +929,7 @@ export default function KnowledgeBase() {
             </div>
           </main>
 
-          <aside className="min-h-0 space-y-4">
+          <aside className="min-h-0 space-y-4 overflow-y-auto pr-1">
             <section className="rounded-lg border border-light-border bg-light-card p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-light-text">
                 <Tags size={16} className="text-accent-blue" />
@@ -895,23 +979,47 @@ export default function KnowledgeBase() {
 
       {editorFile && (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-3 py-4 sm:px-6 sm:py-6">
-          <button type="button" className="absolute inset-0 cursor-default bg-slate-950/55 backdrop-blur-[2px]" aria-label={t.closeEditor} onClick={() => setEditorFile(null)} />
+          <button type="button" className="absolute inset-0 cursor-default bg-slate-950/55 backdrop-blur-[2px]" aria-label={t.closeEditor} onClick={requestCloseEditor} />
           <section role="dialog" aria-modal="true" aria-label={t.editDialog} className="relative flex h-[min(88vh,900px)] w-full max-w-[min(1440px,calc(100vw-2rem))] flex-col overflow-hidden rounded-lg border border-light-border bg-light-card shadow-2xl shadow-slate-950/25">
             <header className="flex min-h-14 items-center justify-between gap-3 border-b border-light-border px-4 py-3">
               <div className="min-w-0">
-                <h2 className="truncate text-base font-semibold text-light-text">{editorFile.name}</h2>
+                <h2 className="flex min-w-0 items-center gap-2 text-base font-semibold text-light-text">
+                  {editorHasUnsavedChanges && <span className="h-2 w-2 shrink-0 rounded-full bg-amber-500" aria-label={t.unsaved} />}
+                  <span className="truncate">{editorFile.name}</span>
+                </h2>
                 <p className="mt-0.5 truncate text-xs text-light-text-secondary">{editorFile.path}</p>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
-                {editorFile.content !== editorFile.originalContent && <span className="rounded-full bg-accent-yellow/10 px-2 py-1 text-xs font-medium text-amber-700">{t.unsaved}</span>}
+              <div className="flex shrink-0 items-center gap-3">
+                <span className="hidden text-xs text-light-text-secondary sm:inline">
+                  {t.lastSaved}: {editorFile.lastSavedAt ? formatDateTime(editorFile.lastSavedAt) : t.notSavedYet}
+                </span>
                 <button type="button" disabled={editorSaving} onClick={() => void handleSaveEditor()} className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-accent-blue px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-cyan-700 disabled:opacity-60">
                   {editorSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
                   {t.save}
                 </button>
-                <IconButton label={t.closeEditor} onClick={() => setEditorFile(null)} className="border border-light-border"><X size={17} /></IconButton>
+                <IconButton label={t.closeEditor} onClick={requestCloseEditor} className="border border-light-border"><X size={17} /></IconButton>
               </div>
             </header>
-            <textarea value={editorFile.content} onChange={event => setEditorFile(current => current ? { ...current, content: event.target.value } : current)} spellCheck={false} autoFocus className="min-h-0 flex-1 resize-none border-0 bg-light-card px-4 py-4 font-mono text-sm leading-6 text-light-text outline-none" />
+            <div className="grid min-h-0 flex-1 grid-cols-[56px_minmax(0,1fr)] bg-slate-950">
+              <div
+                ref={editorLineNumbersRef}
+                aria-hidden="true"
+                className="select-none overflow-hidden border-r border-slate-800 bg-slate-900/95 px-3 py-4 text-right font-mono text-[13px] leading-6 text-slate-500"
+              >
+                {editorLineNumbers.map(line => (
+                  <div key={line} className="h-6 tabular-nums">{line}</div>
+                ))}
+              </div>
+              <textarea
+                value={editorFile.content}
+                onChange={event => setEditorFile(current => current ? { ...current, content: event.target.value } : current)}
+                onKeyDown={handleEditorKeyDown}
+                onScroll={handleEditorScroll}
+                spellCheck={false}
+                autoFocus
+                className="min-h-0 resize-none border-0 bg-slate-950 px-4 py-4 font-mono text-[13px] leading-6 text-slate-100 caret-cyan-300 outline-none selection:bg-cyan-400/25 placeholder:text-slate-500"
+              />
+            </div>
           </section>
         </div>
       )}
@@ -992,7 +1100,11 @@ type TreeSectionProps = {
   newDocName: string
   onSelect: (path: string) => void
   onCreateAt: (type: 'folder' | 'file', parentPath: string) => void
+  onDeletePage: (page: KnowledgePageMeta) => void
+  onDeleteFolder: (path: string) => void
   onToggleFolder: (path: string) => void
+  deletingPath: string | null
+  fullPathForNode: (path: string) => string
   onFolderNameChange: (value: string) => void
   onDocNameChange: (value: string) => void
   onCreateFolder: () => void
@@ -1010,7 +1122,11 @@ function TreeSection({
   newDocName,
   onSelect,
   onCreateAt,
+  onDeletePage,
+  onDeleteFolder,
   onToggleFolder,
+  deletingPath,
+  fullPathForNode,
   onFolderNameChange,
   onDocNameChange,
   onCreateFolder,
@@ -1028,7 +1144,7 @@ function TreeSection({
   return (
     <div className="min-w-0 space-y-0.5">
       {node.path && (
-        <div className="group grid min-w-0 grid-cols-[18px_18px_minmax(0,1fr)_52px] items-center gap-1 rounded-md px-1.5 py-1.5 text-sm text-light-text-secondary transition-colors hover:bg-light-card-hover hover:text-light-text" style={{ marginLeft: rowIndent }}>
+        <div className="group grid min-w-0 grid-cols-[18px_18px_minmax(0,1fr)_78px] items-center gap-1 rounded-md px-1.5 py-1.5 text-sm text-light-text-secondary transition-colors hover:bg-light-card-hover hover:text-light-text" style={{ marginLeft: rowIndent }}>
           <button
             type="button"
             onClick={() => onToggleFolder(node.path)}
@@ -1041,13 +1157,18 @@ function TreeSection({
           <button type="button" onClick={() => onToggleFolder(node.path)} className="min-w-0 cursor-pointer text-left">
             <span className="block truncate font-medium" title={node.path}>{node.name}</span>
           </button>
-          <div className="flex shrink-0 items-center justify-end gap-0.5 opacity-80 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+          <div className="flex shrink-0 items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
             <IconButton label={`${t.newDoc} - ${node.path}`} onClick={() => onCreateAt('file', node.path)} tone="primary" surface="plain" size="sm">
               <FilePlus size={14} />
             </IconButton>
             <IconButton label={`${t.newFolder} - ${node.path}`} onClick={() => onCreateAt('folder', node.path)} tone="primary" surface="plain" size="sm">
               <FolderPlus size={14} />
             </IconButton>
+            <Popconfirm title={t.deleteFolderTitle} description={`"${node.path}" will be deleted from the knowledge base.`} confirmText={t.deleteConfirm} danger onConfirm={() => onDeleteFolder(node.path)}>
+              <button type="button" disabled={deletingPath === fullPathForNode(node.path)} className="inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-light-text-secondary transition-colors hover:bg-accent-red/10 hover:text-accent-red disabled:opacity-50" aria-label={t.deleteFolder}>
+                {deletingPath === fullPathForNode(node.path) ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              </button>
+            </Popconfirm>
           </div>
         </div>
       )}
@@ -1067,20 +1188,22 @@ function TreeSection({
             />
           </div>
           {node.pages.map(page => (
-            <button
+            <div
               key={page.path}
-              type="button"
-              onClick={() => onSelect(page.path)}
-              className={`grid min-w-0 cursor-pointer grid-cols-[18px_18px_minmax(0,1fr)_52px] items-center gap-1 rounded-md px-1.5 py-1.5 text-left transition-colors ${selectedPath === page.path ? 'border border-accent-blue/20 bg-accent-blue/10 text-light-text shadow-sm shadow-cyan-900/5' : 'border border-transparent text-light-text-secondary hover:bg-light-card-hover hover:text-light-text'}`}
+              className={`group grid min-w-0 grid-cols-[18px_18px_minmax(0,1fr)_28px] items-center gap-1 rounded-md px-1.5 py-1.5 text-left transition-colors ${selectedPath === page.path ? 'border border-accent-blue/20 bg-accent-blue/10 text-light-text shadow-sm shadow-cyan-900/5' : 'border border-transparent text-light-text-secondary hover:bg-light-card-hover hover:text-light-text'}`}
               style={{ marginLeft: childIndent }}
             >
               <span className="h-5 w-5" />
               <FileText size={15} className="shrink-0 text-accent-blue" />
-              <span className="min-w-0 truncate font-mono text-sm" title={page.path}>
+              <button type="button" onClick={() => onSelect(page.path)} className="min-w-0 cursor-pointer truncate text-left font-mono text-sm" title={page.path}>
                 {page.name}
-              </span>
-              <span />
-            </button>
+              </button>
+              <Popconfirm title={t.deleteTitle} description={`"${page.name}" will be deleted from the knowledge base.`} confirmText={t.deleteConfirm} danger onConfirm={() => onDeletePage(page)}>
+                <button type="button" disabled={deletingPath === fullPathForNode(page.path)} className="inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-light-text-secondary opacity-0 transition-colors hover:bg-accent-red/10 hover:text-accent-red group-hover:opacity-100 group-focus-within:opacity-100 disabled:opacity-50" aria-label={t.deleteDoc}>
+                  {deletingPath === fullPathForNode(page.path) ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                </button>
+              </Popconfirm>
+            </div>
           ))}
           {node.folders.map(child => (
             <TreeSection
@@ -1093,7 +1216,11 @@ function TreeSection({
               newDocName={newDocName}
               onSelect={onSelect}
               onCreateAt={onCreateAt}
+              onDeletePage={onDeletePage}
+              onDeleteFolder={onDeleteFolder}
               onToggleFolder={onToggleFolder}
+              deletingPath={deletingPath}
+              fullPathForNode={fullPathForNode}
               onFolderNameChange={onFolderNameChange}
               onDocNameChange={onDocNameChange}
               onCreateFolder={onCreateFolder}

@@ -65,7 +65,7 @@ const primaryNav = [
   { to: '/chat', label: '新对话', icon: Pencil },
   { to: '/dashboard', label: '工作台', icon: LayoutDashboard },
   { to: '/knowledge', label: '知识库', icon: BookOpen },
-  { to: '/skills', label: '技能商店', icon: Sparkles },
+  { to: '/skills', label: '技能', icon: Sparkles },
   { to: '/cron', label: '定时任务', icon: Clock },
   { to: '/settings', label: '设置', icon: SettingsIcon },
 ]
@@ -107,6 +107,23 @@ function getAgentIdFromKey(key: string): string {
   const parts = key.split(':')
   if (parts.length >= 2 && parts[0] === 'agent') return parts[1]
   return 'main'
+}
+
+function getAgentDisplayName(agent: AgentInfo | undefined, agentId: string): string {
+  if (agentId === 'main') return '主助手'
+  return agent?.identity?.name || agent?.name || agentId
+}
+
+function normalizeAgentList(items: AgentInfo[]): AgentInfo[] {
+  return [...items]
+    .map(agent => agent.id === 'main'
+      ? { ...agent, name: '主助手', identity: { ...agent.identity, name: '主助手' } }
+      : agent)
+    .sort((a, b) => {
+      if (a.id === 'main') return -1
+      if (b.id === 'main') return 1
+      return getAgentDisplayName(a, a.id).localeCompare(getAgentDisplayName(b, b.id), 'zh-Hans')
+    })
 }
 
 function normalizeSessionKey(key: string): string {
@@ -283,7 +300,7 @@ export default function Layout() {
     setAgentsLoading(true)
     try {
       const result = await listAgents(options)
-      setAgents(result.agents || [])
+      setAgents(normalizeAgentList(result.agents || []))
     } catch {
       setAgents([])
     } finally {
@@ -412,7 +429,7 @@ export default function Layout() {
         const agent = agents.find(item => item.id === agentId)
         return {
           id: agentId,
-          label: agent?.identity?.name || agent?.name || (agentId === 'main' ? '默认' : agentId),
+          label: getAgentDisplayName(agent, agentId),
           sessions: sessionsByAgent.get(agentId) || [],
         }
       })
@@ -686,14 +703,14 @@ export default function Layout() {
                   onClick={() => setOrdinaryFolderOpen(value => !value)}
                   className="flex cursor-pointer items-center gap-1 rounded-md text-xs transition-colors hover:text-light-text"
                 >
-                  <span>对话</span>
+                  <span>主对话</span>
                   <ChevronRight
                     size={13}
                     className={`sidebar-chevron ${ordinaryFolderOpen ? 'is-open' : ''}`}
                   />
                 </button>
                 <IconButton
-                  label="新建默认对话"
+                  label="新建主对话"
                   onClick={() => startAgentSession('main')}
                   size="sm"
                   surface="plain"
@@ -707,7 +724,7 @@ export default function Layout() {
                   {sessionsLoading ? (
                     <SidebarSessionSkeleton count={6} />
                   ) : ordinarySessions.length === 0 ? (
-                    <div className="px-2 py-1 text-xs text-slate-400">暂无默认对话</div>
+                    <div className="px-2 py-1 text-xs text-slate-400">暂无主对话</div>
                   ) : ordinarySessions.slice(0, 8).map(session => {
                     const isActive = activeSessionKey === session.key
                     const isRenaming = renamingKey === session.key
@@ -834,14 +851,14 @@ export default function Layout() {
             className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-light-text transition-colors hover:bg-light-card-hover"
           >
             <Pencil size={15} />
-            Rename
+            重命名
           </button>
           <button
             onClick={() => void copySessionId(contextMenu.session.key)}
             className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-light-text transition-colors hover:bg-light-card-hover"
           >
             <Copy size={15} />
-            Copy session ID
+            复制会话 ID
           </button>
           <Popconfirm
             title="删除这个会话？"
@@ -854,7 +871,7 @@ export default function Layout() {
               className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-accent-red transition-colors hover:bg-accent-red/10"
             >
               <Trash2 size={15} />
-              Delete
+              删除
             </button>
           </Popconfirm>
         </div>
@@ -871,7 +888,7 @@ export default function Layout() {
             className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-light-text transition-colors hover:bg-light-card-hover"
           >
             <Plus size={15} />
-            New conversation
+            新建对话
           </button>
           <button
             onClick={() => {
@@ -881,7 +898,7 @@ export default function Layout() {
             className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-light-text transition-colors hover:bg-light-card-hover"
           >
             <Copy size={15} />
-            Copy Agent ID
+            复制 Agent ID
           </button>
         </div>
       )}

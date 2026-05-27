@@ -40,6 +40,7 @@ from app.runtime_backends.hermes_run import (
     summarize_run_events,
 )
 from app.runtime_backends.hermes_skills import list_skills_from_hermes_container
+from app.runtime_backends.hermes_commands import list_hermes_commands_from_container
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +443,14 @@ class DedicatedHermesBackend:
         async with async_session() as db:
             container = await ensure_running(db, ctx.user.id)
         instructions = agent_identity_prompt_from_hermes_container(container.docker_id, agent_id)
+        knowledge_write_instructions = (
+            "Knowledge base write policy:\n"
+            f"- This Agent's knowledge base root is /opt/data/profiles/{agent_id}/workspace/knowledge/.\n"
+            "- When the user asks to create, edit, or organize knowledge-base content, write Markdown files under that knowledge root.\n"
+            "- Do not create or modify skills for ordinary knowledge-base content unless the user explicitly asks to create a reusable skill.\n"
+            "- Do not ask the user to run sudo/chown for knowledge-base writes; use the writable knowledge root path."
+        )
+        instructions = f"{instructions}\n\n{knowledge_write_instructions}" if instructions else knowledge_write_instructions
         knowledge_context = build_knowledge_context(container.docker_id, agent_id, message)
         if knowledge_context:
             instructions = f"{instructions}\n\n{knowledge_context}" if instructions else knowledge_context
@@ -572,9 +581,25 @@ class DedicatedHermesBackend:
         """Best-effort abort: no direct hermes API for session-level abort."""
         return {"ok": True, "aborted": False, "runIds": []}
 
+    async def respond_run_approval(
+        self,
+        ctx: RuntimeContext,
+        run_id: str,
+        choice: str,
+        resolve_all: bool = False,
+    ) -> dict | list | str:
+        payload = await (await self._client(ctx)).request(
+            "POST",
+            f"/v1/runs/{run_id}/approval",
+            json={"choice": choice, "resolve_all": resolve_all},
+            timeout=10.0,
+        )
+        return payload if isinstance(payload, (dict, list, str)) else {"ok": True}
+
     async def list_commands(self, ctx: RuntimeContext, agent_id: str = "") -> dict:
-        """Hermes does not expose a slash commands API — return empty."""
-        return {"agentId": agent_id or "innovation", "commands": []}
+        async with async_session() as db:
+            container = await ensure_running(db, ctx.user.id)
+        return list_hermes_commands_from_container(container.docker_id, agent_id or "main")
 
     async def upload_file(
         self,
