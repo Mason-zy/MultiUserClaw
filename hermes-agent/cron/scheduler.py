@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -128,6 +129,41 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
+
+
+def _append_nanobot_cron_result(job: dict, content: str, adapters=None) -> Optional[str]:
+    """Mirror SimpleFront-created cron output into its target Hermes session."""
+    session_key = str(job.get("nanobot_session_key") or "").strip()
+    if not session_key or not content:
+        return None
+
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        db.create_session(session_key, "api")
+        title = str(job.get("nanobot_session_title") or "").strip()
+        if title and not db.get_session_title(session_key):
+            try:
+                db.set_session_title(session_key, title)
+            except ValueError:
+                db.set_session_title(session_key, f"{title[:180]} {session_key[-6:]}")
+        db.append_message(session_key, "assistant", content)
+        for adapter in (adapters or {}).values():
+            broadcast = getattr(adapter, "_nanobot_broadcast_event", None)
+            if callable(broadcast):
+                broadcast(
+                    {
+                        "type": "message.completed",
+                        "session_id": session_key,
+                        "message": {"role": "assistant", "content": content},
+                        "timestamp": datetime.now().astimezone().isoformat(),
+                    }
+                )
+        return datetime.now().astimezone().isoformat()
+    except Exception as exc:
+        logger.error("Job '%s': failed to append SimpleFront cron result: %s", job.get("id", "?"), exc)
+        return None
 
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
@@ -1760,6 +1796,20 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
 
                 delivery_error = None
                 if should_deliver:
+                    mirrored_at = _append_nanobot_cron_result(job, deliver_content, adapters=adapters)
+                    if mirrored_at:
+                        try:
+                            from cron.jobs import update_job as _cron_update_job
+
+                            _cron_update_job(
+                                job["id"],
+                                {
+                                    "nanobot_last_output": deliver_content,
+                                    "nanobot_last_output_at": mirrored_at,
+                                },
+                            )
+                        except Exception as meta_exc:
+                            logger.debug("Job '%s': failed to update SimpleFront cron metadata: %s", job["id"], meta_exc)
                     try:
                         delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
                     except Exception as de:

@@ -2375,7 +2375,20 @@ class APIServerAdapter(BasePlatformAdapter):
 
     _JOB_ID_RE = __import__("re").compile(r"[a-f0-9]{12}")
     # Allowed fields for update — prevents clients injecting arbitrary keys
-    _UPDATE_ALLOWED_FIELDS = {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
+    _UPDATE_ALLOWED_FIELDS = {
+        "name",
+        "schedule",
+        "prompt",
+        "deliver",
+        "skills",
+        "skill",
+        "repeat",
+        "enabled",
+        "nanobot_session_key",
+        "nanobot_session_title",
+        "nanobot_last_output",
+        "nanobot_last_output_at",
+    }
     _MAX_NAME_LENGTH = 200
     _MAX_PROMPT_LENGTH = 5000
 
@@ -2428,6 +2441,8 @@ class APIServerAdapter(BasePlatformAdapter):
             deliver = body.get("deliver", "local")
             skills = body.get("skills")
             repeat = body.get("repeat")
+            nanobot_session_key = body.get("nanobot_session_key")
+            nanobot_session_title = body.get("nanobot_session_title")
 
             if not name:
                 return web.json_response({"error": "Name is required"}, status=400)
@@ -2456,6 +2471,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 kwargs["repeat"] = repeat
 
             job = _cron_create(**kwargs)
+            metadata = {}
+            if isinstance(nanobot_session_key, str) and nanobot_session_key.strip():
+                metadata["nanobot_session_key"] = nanobot_session_key.strip()
+            if isinstance(nanobot_session_title, str) and nanobot_session_title.strip():
+                metadata["nanobot_session_title"] = nanobot_session_title.strip()
+            if metadata:
+                try:
+                    from cron.jobs import update_job as _cron_update
+                    updated_job = _cron_update(job["id"], metadata)
+                    if updated_job:
+                        job = updated_job
+                except Exception as exc:
+                    logger.warning("Failed to attach Nanobot cron metadata: %s", exc)
             return web.json_response({"job": job})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)

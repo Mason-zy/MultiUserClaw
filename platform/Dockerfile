@@ -4,6 +4,10 @@ WORKDIR /app
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} uv
 
 # Copy dependency files first for better layer caching

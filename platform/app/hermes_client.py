@@ -97,6 +97,7 @@ class HermesClient:
         session_key: str | None = None,
         model: str = "hermes-agent",
         conversation_history: list[dict[str, str]] | None = None,
+        instructions: str | None = None,
     ) -> dict:
         body: dict[str, Any] = {
             "model": model,
@@ -106,6 +107,8 @@ class HermesClient:
             body["session_id"] = session_id
         if conversation_history is not None:
             body["conversation_history"] = conversation_history
+        if instructions:
+            body["instructions"] = instructions
         headers = {}
         if session_key:
             headers["X-Hermes-Session-Key"] = session_key

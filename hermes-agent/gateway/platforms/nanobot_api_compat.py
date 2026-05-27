@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_ROUTES = (
     ("GET", "/api/hermes/sessions", "_handle_list_sessions"),
+    ("POST", "/api/hermes/sessions", "_handle_create_session"),
     ("GET", "/api/hermes/sessions/{session_id}", "_handle_get_session"),
     ("PUT", "/api/hermes/sessions/{session_id}/title", "_handle_rename_session"),
     ("DELETE", "/api/hermes/sessions/{session_id}", "_handle_delete_session"),
@@ -134,6 +135,7 @@ def _registered_route_keys(app: Any) -> set[tuple[str, str]]:
 def _add_route(app: Any, method: str, path: str, handler: Any) -> None:
     add_method = {
         "GET": app.router.add_get,
+        "POST": app.router.add_post,
         "PUT": app.router.add_put,
         "DELETE": app.router.add_delete,
     }[method]
@@ -239,6 +241,43 @@ async def _handle_list_sessions(adapter: Any, request: "web.Request") -> "web.Re
         )
 
     return web.json_response({"sessions": [_session_summary_payload(session) for session in sessions]})
+
+
+async def _handle_create_session(adapter: Any, request: "web.Request") -> "web.Response":
+    auth_err = adapter._check_auth(request)
+    if auth_err:
+        return auth_err
+
+    db = adapter._ensure_session_db()
+    if db is None:
+        return web.json_response(_openai_error("Session store unavailable"), status=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+    session_key = str(body.get("session_key") or body.get("session_id") or "").strip()
+    if not session_key:
+        return web.json_response(_openai_error("Missing 'session_key' field"), status=400)
+
+    try:
+        db.create_session(session_key, str(body.get("source") or "api"))
+        title = body.get("title")
+        if title:
+            try:
+                db.set_session_title(session_key, str(title))
+            except ValueError:
+                db.set_session_title(session_key, f"{str(title)[:180]} {session_key[-6:]}")
+        session = db.get_session(session_key)
+    except Exception as exc:
+        logger.error("Failed to create Hermes session %s: %s", session_key, exc, exc_info=True)
+        return web.json_response(
+            _openai_error(f"Failed to create session: {exc}", err_type="server_error"),
+            status=500,
+        )
+
+    return web.json_response(_session_summary_payload(session or {"id": session_key}))
 
 
 async def _handle_get_session(adapter: Any, request: "web.Request") -> "web.Response":
@@ -417,10 +456,12 @@ def install() -> None:
         return
 
     adapter_cls._handle_list_sessions = _handle_list_sessions
+    adapter_cls._handle_create_session = _handle_create_session
     adapter_cls._handle_get_session = _handle_get_session
     adapter_cls._handle_rename_session = _handle_rename_session
     adapter_cls._handle_delete_session = _handle_delete_session
     adapter_cls._handle_events_stream = _handle_events_stream
+    adapter_cls._nanobot_broadcast_event = _broadcast_event
 
     original_create_agent = adapter_cls._create_agent
 

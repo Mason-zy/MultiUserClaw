@@ -133,7 +133,7 @@ async def ensure_shared_agent_binding(
     binding = result.scalar_one_or_none()
     if binding is None:
         agent_id = build_shared_agent_id(user.id)
-        workspace_dir = f"~/.openclaw/workspace-{agent_id}"
+        workspace_dir = f"profiles/{agent_id}/workspace"
         if provision_openclaw_agent:
             await create_shared_agent(agent_id, workspace_dir, user.username)
         binding = SharedAgentBinding(
@@ -156,7 +156,7 @@ async def ensure_shared_agent_binding(
     return SharedAgentContext(
         binding=binding,
         session_prefix=f"agent:{binding.openclaw_agent_id}:",
-        upload_dir=f"workspace-{binding.openclaw_agent_id}/uploads",
+        upload_dir=f"profiles/{binding.openclaw_agent_id}/workspace/uploads",
     )
 
 

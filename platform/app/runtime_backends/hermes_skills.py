@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import io
 import json
+import mimetypes
 import posixpath
 import re
+import shutil
+import subprocess
 import tarfile
+import tempfile
 import time
 import zipfile
+from pathlib import Path
 
 from docker.errors import APIError as DockerAPIError
 from docker.errors import NotFound as DockerNotFound
@@ -15,9 +20,12 @@ from fastapi import HTTPException, UploadFile, status
 from app.container.manager import get_docker_container
 
 HERMES_SKILLS_ROOT = "/opt/data/skills"
+HERMES_PROFILES_ROOT = "/opt/data/profiles"
 _SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,80}$")
+_GIT_SCAN_CACHE: dict[str, dict] = {}
 
 _LIST_SKILLS_SCRIPT = r"""
+import hashlib
 import json
 from pathlib import Path
 
@@ -51,6 +59,22 @@ def frontmatter(path: Path) -> dict[str, str]:
     return result
 
 
+def dir_fingerprint(path: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(path.rglob("*")):
+        if not item.is_file():
+            continue
+        try:
+            rel = item.relative_to(path).as_posix()
+            digest.update(rel.encode("utf-8", errors="replace"))
+            digest.update(b"\0")
+            digest.update(item.read_bytes())
+            digest.update(b"\0")
+        except OSError:
+            continue
+    return digest.hexdigest()
+
+
 skills = []
 if root.exists():
     for skill_file in sorted(root.rglob("SKILL.md")):
@@ -58,6 +82,7 @@ if root.exists():
         rel = skill_file.relative_to(root)
         fallback_name = skill_file.parent.name
         name = meta.get("name") or fallback_name
+        fingerprint = dir_fingerprint(skill_file.parent)
         skills.append(
             {
                 "name": name,
@@ -65,10 +90,54 @@ if root.exists():
                 "source": "hermes",
                 "disabled": False,
                 "path": str(rel.parent),
+                "fingerprint": fingerprint,
             }
         )
 
 print(json.dumps(skills, ensure_ascii=False))
+"""
+
+_RESOLVE_SKILL_SCRIPT = r"""
+def clean_scalar(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return value
+
+
+def frontmatter_name(path):
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if ":" not in line or line[:1].isspace():
+            continue
+        key, value = line.split(":", 1)
+        if key.strip() == "name":
+            return clean_scalar(value)
+    return ""
+
+
+def resolve_skill_dir(root, skill):
+    direct = os.path.realpath(os.path.join(root, skill))
+    root_real = os.path.realpath(root)
+    if direct.startswith(root_real + os.sep) and os.path.isdir(direct):
+        return direct
+    matches = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        if "SKILL.md" not in filenames:
+            continue
+        skill_file = Path(dirpath) / "SKILL.md"
+        if frontmatter_name(skill_file) == skill or os.path.basename(dirpath) == skill:
+            real = os.path.realpath(dirpath)
+            if real.startswith(root_real + os.sep):
+                matches.append(real)
+    return sorted(matches)[0] if matches else ""
 """
 
 
@@ -188,7 +257,113 @@ def _build_skill_archive(skill_name: str, files: dict[str, bytes]) -> bytes:
     return _build_skills_archive({skill_name: files})
 
 
-async def upload_skill_zip_to_hermes_container(container_id_or_name: str | None, file: UploadFile) -> dict:
+def _scope_root(scope: str | None, agent_id: str | None = None) -> str:
+    if scope == "agent":
+        agent = _safe_skill_name(agent_id or "")
+        return f"{HERMES_PROFILES_ROOT}/{agent}/skills"
+    return HERMES_SKILLS_ROOT
+
+
+def _scope_metadata(scope: str | None, agent_id: str | None = None) -> tuple[str, str, str]:
+    scope_type = "agent" if scope == "agent" else "global"
+    scope_id = f"agent:{agent_id}" if scope_type == "agent" and agent_id else scope_type
+    scope_label = f"{agent_id} 技能" if scope_type == "agent" and agent_id else "全局技能"
+    return scope_type, scope_id, scope_label
+
+
+def _safe_rel_path(value: str | None) -> str:
+    raw = (value or "").strip().replace("\\", "/").strip("/")
+    normalized = posixpath.normpath(raw)
+    if not normalized or normalized in {".", ".."} or normalized.startswith("../") or "/../" in normalized:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid skill file path")
+    return normalized
+
+
+def _exec_json(container_id_or_name: str | None, script: str, *args: str):
+    if not container_id_or_name:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Hermes runtime container is unavailable",
+        )
+    try:
+        container = get_docker_container(container_id_or_name)
+        result = container.exec_run(["python3", "-c", script, *args])
+    except DockerNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Hermes runtime container is unavailable",
+        ) from exc
+    except DockerAPIError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Hermes skill operation failed") from exc
+    exit_code, output = _exec_output(result)
+    if exit_code != 0:
+        detail = output.decode("utf-8", errors="replace") or "Hermes skill operation failed"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    try:
+        return json.loads(output.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unexpected Hermes skills response") from exc
+
+
+def _put_skill_archive(
+    container_id_or_name: str | None,
+    root: str,
+    skill_files: dict[str, dict[str, bytes]],
+) -> None:
+    if not container_id_or_name:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Hermes runtime container is unavailable",
+        )
+    archive = _build_skills_archive(skill_files)
+    try:
+        container = get_docker_container(container_id_or_name)
+        result = container.exec_run(["mkdir", "-p", root])
+        exit_code, _output = _exec_output(result)
+        if exit_code != 0:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to prepare Hermes skills directory")
+        ok = container.put_archive(root, archive)
+    except DockerNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Hermes runtime container is unavailable",
+        ) from exc
+    except DockerAPIError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install Hermes skill") from exc
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install Hermes skill")
+
+
+def skill_scopes(agent_ids: list[str] | None = None) -> list[dict]:
+    scopes = [
+        {
+            "id": "global",
+            "type": "global",
+            "label": "全局技能",
+            "path": HERMES_SKILLS_ROOT,
+            "writable": True,
+        }
+    ]
+    for agent_id in agent_ids or []:
+        scopes.append(
+            {
+                "id": f"agent:{agent_id}",
+                "type": "agent",
+                "label": f"{agent_id} 技能",
+                "path": f"{HERMES_PROFILES_ROOT}/{_safe_skill_name(agent_id)}/skills",
+                "agentId": agent_id,
+                "writable": True,
+            }
+        )
+    return scopes
+
+
+async def upload_skill_zip_to_hermes_container(
+    container_id_or_name: str | None,
+    file: UploadFile,
+    scope: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
     if not container_id_or_name:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -243,37 +418,34 @@ async def upload_skill_zip_to_hermes_container(container_id_or_name: str | None,
             }
         )
 
-    archive = _build_skills_archive(skill_files)
-    try:
-        container = get_docker_container(container_id_or_name)
-        result = container.exec_run(["mkdir", "-p", HERMES_SKILLS_ROOT])
-        exit_code, _output = _exec_output(result)
-        if exit_code != 0:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to prepare Hermes skills directory")
-        ok = container.put_archive(HERMES_SKILLS_ROOT, archive)
-    except DockerNotFound as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Hermes runtime container is unavailable",
-        ) from exc
-    except DockerAPIError as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install Hermes skill") from exc
-
-    if not ok:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install Hermes skill")
+    scope_root = _scope_root(scope, agent_id)
+    _put_skill_archive(container_id_or_name, scope_root, skill_files)
+    scope_type, scope_id, scope_label = _scope_metadata(scope, agent_id)
 
     payload = {
         "name": installed[0]["name"],
         "description": installed[0]["description"],
         "source": "hermes",
         "disabled": False,
+        "scope": scope_id,
+        "scopeType": scope_type,
+        "scopeLabel": scope_label,
+        "agentId": agent_id if scope_type == "agent" else None,
+        "path": installed[0].get("path", installed[0]["name"]),
+        "dirPath": installed[0].get("path", installed[0]["name"]),
+        "available": True,
+        "writable": True,
     }
     if len(installed) > 1:
         payload["installed"] = installed
     return payload
 
 
-def list_skills_from_hermes_container(container_id_or_name: str | None) -> list[dict]:
+def _raw_skills_from_hermes_container(
+    container_id_or_name: str | None,
+    scope: str | None = None,
+    agent_id: str | None = None,
+) -> list[dict]:
     if not container_id_or_name:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -282,7 +454,9 @@ def list_skills_from_hermes_container(container_id_or_name: str | None) -> list[
 
     try:
         container = get_docker_container(container_id_or_name)
-        result = container.exec_run(["python3", "-c", _LIST_SKILLS_SCRIPT])
+        root = _scope_root(scope, agent_id)
+        script = _LIST_SKILLS_SCRIPT.replace('root = Path("/opt/data/skills")', "import sys\nroot = Path(sys.argv[1])")
+        result = container.exec_run(["python3", "-c", script, root])
     except DockerNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -312,3 +486,325 @@ def list_skills_from_hermes_container(container_id_or_name: str | None) -> list[
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict) and item.get("name")]
+
+
+def list_skills_from_hermes_container(
+    container_id_or_name: str | None,
+    scope: str | None = None,
+    agent_id: str | None = None,
+    *,
+    inherited_global: bool = False,
+) -> list[dict]:
+    payload = _raw_skills_from_hermes_container(container_id_or_name, scope, agent_id)
+    if scope == "agent" and not inherited_global:
+        global_skills = _raw_skills_from_hermes_container(container_id_or_name, scope="global")
+        inherited = {
+            (str(item.get("name") or ""), str(item.get("fingerprint") or ""))
+            for item in global_skills
+            if item.get("name") and item.get("fingerprint")
+        }
+        payload = [
+            item for item in payload
+            if (str(item.get("name") or ""), str(item.get("fingerprint") or "")) not in inherited
+        ]
+
+    scope_type, scope_id, scope_label = _scope_metadata(scope, agent_id)
+    normalized = []
+    for item in payload:
+        path = str(item.get("path") or item.get("name") or "")
+        public_item = {key: value for key, value in item.items() if key != "fingerprint"}
+        normalized.append({
+            **public_item,
+            "scope": scope_id,
+            "scopeType": scope_type,
+            "scopeLabel": scope_label,
+            "agentId": agent_id if scope == "agent" else None,
+            "available": True,
+            "disabled": bool(item.get("disabled", False)),
+            "writable": True,
+            "dirPath": path,
+        })
+    return normalized
+
+
+def install_existing_skill_to_hermes_scope(
+    container_id_or_name: str | None,
+    skill_name: str,
+    scope: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    skill = _safe_skill_name(skill_name)
+    source_root = HERMES_SKILLS_ROOT
+    target_root = _scope_root(scope, agent_id)
+    script = _RESOLVE_SKILL_SCRIPT + r"""
+import json, os, shutil, sys
+from pathlib import Path
+source_root, target_root, skill = sys.argv[1], sys.argv[2], sys.argv[3]
+source = resolve_skill_dir(source_root, skill)
+if not source:
+    raise SystemExit("skill not found")
+source_real = os.path.realpath(source)
+source_root_real = os.path.realpath(source_root)
+target_root_real = os.path.realpath(target_root)
+if not source_real.startswith(source_root_real + os.sep):
+    raise SystemExit("invalid source")
+target = os.path.realpath(os.path.join(target_root, os.path.basename(source_real)))
+if not target.startswith(target_root_real + os.sep):
+    raise SystemExit("invalid target")
+os.makedirs(target_root, exist_ok=True)
+if source_real != target:
+    if os.path.exists(target):
+        shutil.rmtree(target)
+    shutil.copytree(source_real, target)
+print(json.dumps({"ok": True, "name": skill, "path": os.path.relpath(target, target_root).replace(os.sep, "/")}, ensure_ascii=False))
+"""
+    payload = _exec_json(container_id_or_name, script, source_root, target_root, skill)
+    scope_type, scope_id, scope_label = _scope_metadata(scope, agent_id)
+    return {
+        "ok": True,
+        "output": "installed",
+        "name": payload.get("name", skill) if isinstance(payload, dict) else skill,
+        "scope": scope_id,
+        "scopeType": scope_type,
+        "scopeLabel": scope_label,
+        "agentId": agent_id if scope_type == "agent" else None,
+    }
+
+
+def _scan_skill_dir(skill_dir: Path, root: Path) -> dict:
+    skill_file = skill_dir / "SKILL.md"
+    content = skill_file.read_text(encoding="utf-8", errors="replace")
+    meta = _skill_frontmatter(content)
+    name = _safe_skill_name(meta.get("name") or skill_dir.name)
+    return {
+        "name": name,
+        "description": meta.get("description", ""),
+        "relativePath": skill_dir.relative_to(root).as_posix(),
+    }
+
+
+def scan_git_skills(url: str) -> dict:
+    source_url = url.strip()
+    if not source_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Git URL is required")
+
+    cache_key = f"git-{int(time.time() * 1000)}"
+    temp_dir = Path(tempfile.mkdtemp(prefix="openclaw-skill-git-"))
+    repo_dir = temp_dir / "repo"
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", source_url, str(repo_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        detail = "Failed to clone Git repository"
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            detail = exc.stderr.strip()[-500:]
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+    skills = []
+    for skill_file in sorted(repo_dir.rglob("SKILL.md")):
+        if ".git" in skill_file.parts:
+            continue
+        try:
+            skills.append(_scan_skill_dir(skill_file.parent, repo_dir))
+        except HTTPException:
+            continue
+
+    repo_name = source_url.rstrip("/").split("/")[-1].removesuffix(".git") or repo_dir.name
+    _GIT_SCAN_CACHE[cache_key] = {
+        "tempDir": str(temp_dir),
+        "repoDir": str(repo_dir),
+        "repo": source_url,
+        "repoName": repo_name,
+        "skills": skills,
+        "createdAt": time.time(),
+    }
+    return {"repo": source_url, "repoName": repo_name, "skills": skills, "cacheKey": cache_key}
+
+
+def install_git_skills_to_hermes_container(
+    container_id_or_name: str | None,
+    cache_key: str,
+    skill_names: list[str],
+    scope: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    cached = _GIT_SCAN_CACHE.get(cache_key)
+    if not cached:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Git scan cache expired; scan the repository again")
+    repo_dir = Path(str(cached["repoDir"])).resolve()
+    selected = {_safe_skill_name(name) for name in skill_names}
+    available = {str(item["name"]): item for item in cached.get("skills", []) if isinstance(item, dict)}
+    if not selected:
+        selected = set(available)
+
+    skill_files: dict[str, dict[str, bytes]] = {}
+    installed: list[str] = []
+    errors: list[str] = []
+    for name in sorted(selected):
+        item = available.get(name)
+        if not item:
+            errors.append(f"{name}: not found")
+            continue
+        rel_path = _safe_skill_path(str(item.get("relativePath") or name))
+        source_dir = (repo_dir / rel_path).resolve()
+        try:
+            source_dir.relative_to(repo_dir)
+        except ValueError:
+            errors.append(f"{name}: invalid path")
+            continue
+        files: dict[str, bytes] = {}
+        for path in sorted(source_dir.rglob("*")):
+            if not path.is_file() or ".git" in path.parts:
+                continue
+            rel = path.relative_to(source_dir).as_posix()
+            files[_safe_rel_path(rel)] = path.read_bytes()
+        if "SKILL.md" not in files:
+            errors.append(f"{name}: missing SKILL.md")
+            continue
+        skill_files[name] = files
+        installed.append(name)
+
+    if skill_files:
+        _put_skill_archive(container_id_or_name, _scope_root(scope, agent_id), skill_files)
+    return {"ok": len(errors) == 0, "installed": installed, "errors": errors}
+
+
+def delete_skill_from_hermes_container(container_id_or_name: str | None, skill_name: str, scope: str | None = None, agent_id: str | None = None) -> dict:
+    skill = _safe_skill_name(skill_name)
+    root = _scope_root(scope, agent_id)
+    script = _RESOLVE_SKILL_SCRIPT + r"""
+import os, shutil, sys
+from pathlib import Path
+root, skill = sys.argv[1], sys.argv[2]
+target = resolve_skill_dir(root, skill)
+root_real = os.path.realpath(root)
+if not target or not target.startswith(root_real + os.sep):
+    raise SystemExit("skill not found")
+shutil.rmtree(target)
+print('{"ok": true}')
+"""
+    return _exec_json(container_id_or_name, script, root, skill)
+
+
+def list_skill_files_from_hermes_container(container_id_or_name: str | None, skill_name: str, scope: str | None = None, agent_id: str | None = None) -> dict:
+    skill = _safe_skill_name(skill_name)
+    root = _scope_root(scope, agent_id)
+    script = _RESOLVE_SKILL_SCRIPT + r"""
+import json, os, sys
+from datetime import datetime, timezone
+from pathlib import Path
+root, skill = sys.argv[1], sys.argv[2]
+target = resolve_skill_dir(root, skill)
+root_real = os.path.realpath(root)
+if not target or not target.startswith(root_real + os.sep) or not os.path.isdir(target):
+    raise SystemExit("skill not found")
+files = []
+for dirpath, _dirnames, filenames in os.walk(target):
+    for filename in filenames:
+        path = os.path.join(dirpath, filename)
+        rel = os.path.relpath(path, target).replace(os.sep, "/")
+        stat = os.stat(path)
+        ext = os.path.splitext(filename)[1].lower()
+        files.append({
+            "name": filename,
+            "path": rel,
+            "size": stat.st_size,
+            "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "editable": ext in {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".py", ".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".sh"},
+        })
+print(json.dumps({"files": sorted(files, key=lambda item: item["path"])}, ensure_ascii=False))
+"""
+    payload = _exec_json(container_id_or_name, script, root, skill)
+    return {"skill": {"name": skill}, "files": payload.get("files", []) if isinstance(payload, dict) else []}
+
+
+def read_skill_file_from_hermes_container(container_id_or_name: str | None, skill_name: str, file_path: str, scope: str | None = None, agent_id: str | None = None) -> dict:
+    skill = _safe_skill_name(skill_name)
+    rel = _safe_rel_path(file_path)
+    root = _scope_root(scope, agent_id)
+    script = _RESOLVE_SKILL_SCRIPT + r"""
+import json, os, sys
+from pathlib import Path
+root, skill, rel = sys.argv[1], sys.argv[2], sys.argv[3]
+base = resolve_skill_dir(root, skill)
+if not base:
+    raise SystemExit("skill not found")
+target = os.path.realpath(os.path.join(base, rel))
+if not target.startswith(base + os.sep) or not os.path.isfile(target):
+    raise SystemExit("file not found")
+with open(target, "r", encoding="utf-8", errors="replace") as fh:
+    content = fh.read()
+print(json.dumps({"path": rel, "name": os.path.basename(target), "content": content}, ensure_ascii=False))
+"""
+    return _exec_json(container_id_or_name, script, root, skill, rel)
+
+
+def write_skill_file_to_hermes_container(container_id_or_name: str | None, skill_name: str, file_path: str, content: str, scope: str | None = None, agent_id: str | None = None) -> dict:
+    skill = _safe_skill_name(skill_name)
+    rel = _safe_rel_path(file_path)
+    root = _scope_root(scope, agent_id)
+    script = _RESOLVE_SKILL_SCRIPT + r"""
+import json, os, sys
+from pathlib import Path
+root, skill, rel, content = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+base = resolve_skill_dir(root, skill)
+if not base:
+    raise SystemExit("skill not found")
+target = os.path.realpath(os.path.join(base, rel))
+if not target.startswith(base + os.sep):
+    raise SystemExit("invalid path")
+os.makedirs(os.path.dirname(target), exist_ok=True)
+with open(target, "w", encoding="utf-8") as fh:
+    fh.write(content)
+print(json.dumps({"ok": True, "path": rel}, ensure_ascii=False))
+"""
+    return _exec_json(container_id_or_name, script, root, skill, rel, content)
+
+
+def skill_zip_from_hermes_container(container_id_or_name: str | None, skill_name: str, scope: str | None = None, agent_id: str | None = None) -> tuple[bytes, str]:
+    if not container_id_or_name:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Hermes runtime container is unavailable")
+    skill = _safe_skill_name(skill_name)
+    root = _scope_root(scope, agent_id)
+    try:
+        container = get_docker_container(container_id_or_name)
+        resolve_script = _RESOLVE_SKILL_SCRIPT + r"""
+import json, os, sys
+from pathlib import Path
+root, skill = sys.argv[1], sys.argv[2]
+target = resolve_skill_dir(root, skill)
+if not target:
+    raise SystemExit("skill not found")
+print(json.dumps({"path": target}, ensure_ascii=False))
+"""
+        result = container.exec_run(["python3", "-c", resolve_script, root, skill])
+        exit_code, output = _exec_output(result)
+        if exit_code != 0:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Hermes skill not found")
+        payload = json.loads(output.decode("utf-8"))
+        stream, _stat = container.get_archive(payload["path"])
+    except DockerNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Hermes skill not found") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unexpected Hermes skills response") from exc
+    except DockerAPIError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to download Hermes skill") from exc
+
+    source_tar = b"".join(stream)
+    zip_buffer = io.BytesIO()
+    with tarfile.open(fileobj=io.BytesIO(source_tar), mode="r:*") as tar, zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for member in tar:
+            if not member.isfile():
+                continue
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                continue
+            rel = member.name.split("/", 1)[-1] if "/" in member.name else member.name
+            zf.writestr(f"{skill}/{rel}", extracted.read())
+    return zip_buffer.getvalue(), mimetypes.types_map.get(".zip", "application/zip")

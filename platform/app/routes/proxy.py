@@ -10,6 +10,8 @@ import asyncio
 import json
 import logging
 import math
+import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -69,6 +71,19 @@ def _iso_to_ms(value: Any) -> int | None:
         return None
 
 
+def _safe_session_part(value: Any, fallback: str = "default") -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9_-]+", "-", text)
+    text = text.strip("-_")
+    return text[:48] or fallback
+
+
+def _cron_session_key(agent_id: str, job_name: str) -> str:
+    agent = _safe_session_part(agent_id or "main", "main")
+    name = _safe_session_part(job_name or "cron", "cron")
+    return f"agent:{agent}:cron-{name}-{uuid.uuid4().hex[:6]}"
+
+
 def _hermes_model_to_openclaw_model(item: Any) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -111,6 +126,10 @@ def _hermes_job_to_openclaw_cron_job(job: dict[str, Any]) -> dict[str, Any]:
         "deliver": bool(job.get("deliver") and job.get("deliver") != "local"),
         "channel": None if job.get("deliver") in (None, "local") else str(job.get("deliver")),
         "to": None,
+        "session_key": job.get("nanobot_session_key") or job.get("session_key") or None,
+        "last_output": job.get("nanobot_last_output") or None,
+        "last_output_at_ms": _iso_to_ms(job.get("nanobot_last_output_at")),
+        "last_delivery_error": job.get("last_delivery_error"),
         "next_run_at_ms": _iso_to_ms(job.get("next_run_at")),
         "last_run_at_ms": _iso_to_ms(job.get("last_run_at")),
         "last_status": job.get("last_status"),
@@ -134,6 +153,21 @@ def _openclaw_cron_schedule_to_hermes(body: dict[str, Any]) -> str:
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="Hermes cron compatibility requires cron_expr, at_iso, or every_seconds",
     )
+
+
+async def _ensure_hermes_cron_session(base_url: str, session_key: str, title: str) -> None:
+    payload = {"session_key": session_key, "title": title}
+    try:
+        response = await _hermes_request("POST", base_url, "/api/hermes/sessions", json=payload)
+        if response.status_code >= 400:
+            logger.warning(
+                "hermes_cron_session_create_failed status=%s session_key=%s body=%s",
+                response.status_code,
+                session_key,
+                response.text[:300],
+            )
+    except Exception as exc:
+        logger.warning("hermes_cron_session_create_failed session_key=%s error=%s", session_key, exc)
 
 
 def _safe_json_payload(response: httpx.Response) -> Any:
@@ -221,11 +255,18 @@ async def _proxy_hermes_cron(path: str, request: Request, base_url: str) -> JSON
 
     if parts == ["cron", "jobs"] and request.method == "POST":
         body = json.loads((await request.body()) or b"{}")
+        name = body.get("name") or "cron job"
+        agent_id = body.get("agentId") or body.get("agent_id") or "main"
+        session_key = body.get("sessionKey") or body.get("session_key") or _cron_session_key(str(agent_id), str(name))
+        session_title = body.get("sessionTitle") or body.get("session_title") or str(name)
+        await _ensure_hermes_cron_session(base_url, str(session_key), str(session_title))
         hermes_body = {
-            "name": body.get("name") or "cron job",
+            "name": name,
             "prompt": body.get("message") or "",
             "schedule": _openclaw_cron_schedule_to_hermes(body),
             "deliver": body.get("channel") if body.get("deliver") and body.get("channel") else "local",
+            "nanobot_session_key": session_key,
+            "nanobot_session_title": session_title,
         }
         response = await _hermes_request("POST", base_url, "/api/jobs", json=hermes_body)
         payload = _safe_json_payload(response)

@@ -97,13 +97,13 @@ def _runtime_image() -> str:
 
 def _runtime_mount_target() -> str:
     if _runtime_backend() == "hermes":
-        return "/workspace"
+        return "/opt/data"
     return "/root/.openclaw"
 
 
 def _runtime_command() -> list[str]:
     if _runtime_backend() == "hermes":
-        return []
+        return ["gateway", "run"]
     return ["node", "bridge/dist/bridge/start.js"]
 
 
@@ -608,7 +608,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     # Fetch user's SSO token if available (e.g. InfoX-Med)
     user_result = await db.execute(select(User).where(User.id == user_id))
     user_row = user_result.scalar_one_or_none()
-    sso_token = user_row.sso_token if user_row else None
+    sso_token = getattr(user_row, "sso_token", None) if user_row else None
 
     container_env = _runtime_environment(container_token, sso_token)
 
