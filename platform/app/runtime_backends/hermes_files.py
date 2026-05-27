@@ -383,7 +383,8 @@ def _ensure_openclaw_compat_links(container) -> None:
             "-lc",
             "mkdir -p /opt/data/home /root "
             "&& ln -sfn /opt/data /opt/data/home/.openclaw "
-            "&& ln -sfn /opt/data /root/.openclaw",
+            "&& ln -sfn /opt/data /root/.openclaw "
+            "&& ln -sfn /opt/data /opt/data/.openclaw",
         ]
     )
     exit_code = getattr(result, "exit_code", result[0] if isinstance(result, tuple) else 0)

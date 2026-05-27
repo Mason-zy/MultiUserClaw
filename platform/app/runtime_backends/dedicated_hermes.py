@@ -502,8 +502,47 @@ class DedicatedHermesBackend:
         return {"ok": True, "aborted": False, "runIds": []}
 
     async def list_commands(self, ctx: RuntimeContext, agent_id: str = "") -> dict:
-        """Hermes does not expose a slash commands API — return empty."""
-        return {"agentId": agent_id or "innovation", "commands": []}
+        """Build slash command list from skills installed in the user's container."""
+        from app.runtime_backends.hermes_skills import list_skills_from_hermes_container
+
+        # Built-in gateway commands useful in the web UI
+        builtin: list[dict] = [
+            {"name": "new", "description": "开始新会话", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "retry", "description": "重试上一条消息", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "undo", "description": "撤销上一轮对话", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "title", "description": "设置会话标题", "argument_hint": "[name]", "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "model", "description": "切换模型", "argument_hint": "[model]", "aliases": [], "category": "options", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "help", "description": "显示帮助信息", "argument_hint": None, "aliases": [], "category": "status", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "status", "description": "显示会话状态", "argument_hint": None, "aliases": [], "category": "status", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "skills", "description": "管理技能", "argument_hint": "[list|search|install]", "aliases": [], "category": "tools", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "stop", "description": "停止所有后台进程", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+        ]
+
+        # Skill-based slash commands from the user's hermes container
+        skill_commands: list[dict] = []
+        try:
+            async with async_session() as db:
+                container = await ensure_running(db, ctx.user.id)
+            skills = list_skills_from_hermes_container(container.docker_id)
+            for skill in skills:
+                name = str(skill.get("name", ""))
+                if not name:
+                    continue
+                cmd_name = name.lower().replace("_", "-").replace(" ", "-")
+                skill_commands.append({
+                    "name": cmd_name,
+                    "description": str(skill.get("description", "")),
+                    "argument_hint": "<prompt>",
+                    "aliases": [],
+                    "category": "skills",
+                    "scope": "both",
+                    "source": "skill",
+                    "skill_name": name,
+                })
+        except Exception:
+            pass
+
+        return {"agentId": agent_id or "innovation", "commands": builtin + skill_commands}
 
     async def upload_file(
         self,

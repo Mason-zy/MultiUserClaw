@@ -77,7 +77,6 @@ class Settings(BaseSettings):
 
     # 建议增加 shm（非常重要，防止 Chromium 崩溃）
     container_shm_size: str = "1g"
-    container_data_dir: str = "/data/openclaw-users"
 
     # Idle management
     container_idle_pause_minutes: int = 30
@@ -99,6 +98,10 @@ class Settings(BaseSettings):
 
     # Public-facing base URL (used to generate external access URLs in port mapping)
     public_base_url: str = "http://openclaw.infox-med.com"
+
+    # Skills marketplace (Gitee repo with categories)
+    skills_marketplace_repo: str = "https://github.com/johnson7788/collect_skills.git"
+    skills_marketplace_branch: str = "main"
 
     # Local dev: set to e.g. "http://127.0.0.1:18080" to skip Docker containers
     dev_openclaw_url: str = ""

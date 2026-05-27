@@ -270,6 +270,56 @@ class SharedHermesBackend(RuntimeBackend):
             shared_ctx.upload_dir,
         )
 
+    async def list_commands(self, ctx: RuntimeContext, agent_id: str = "") -> dict:
+        """Build slash command list from skills in the shared hermes container."""
+        # Built-in gateway commands useful in the web UI
+        builtin: list[dict] = [
+            {"name": "new", "description": "开始新会话", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "retry", "description": "重试上一条消息", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "undo", "description": "撤销上一轮对话", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "title", "description": "设置会话标题", "argument_hint": "[name]", "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "model", "description": "切换模型", "argument_hint": "[model]", "aliases": [], "category": "options", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "help", "description": "显示帮助信息", "argument_hint": None, "aliases": [], "category": "status", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "status", "description": "显示会话状态", "argument_hint": None, "aliases": [], "category": "status", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "skills", "description": "管理技能", "argument_hint": "[list|search|install]", "aliases": [], "category": "tools", "scope": "both", "source": "builtin", "skill_name": None},
+            {"name": "stop", "description": "停止所有后台进程", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
+        ]
+
+        skill_commands: list[dict] = []
+        try:
+            skills = list_skills_from_hermes_container(SHARED_HERMES_CONTAINER_NAME)
+            for skill in skills:
+                name = str(skill.get("name", ""))
+                if not name:
+                    continue
+                cmd_name = name.lower().replace("_", "-").replace(" ", "-")
+                skill_commands.append({
+                    "name": cmd_name,
+                    "description": str(skill.get("description", "")),
+                    "argument_hint": "<prompt>",
+                    "aliases": [],
+                    "category": "skills",
+                    "scope": "both",
+                    "source": "skill",
+                    "skill_name": name,
+                })
+        except Exception:
+            pass
+
+        return {"agentId": agent_id or "innovation", "commands": builtin + skill_commands}
+
+    async def abort_run(self, ctx: RuntimeContext, run_id: str, session_key: str = "") -> dict:
+        """Best-effort abort via shared hermes."""
+        try:
+            await self._request("POST", f"/v1/runs/{run_id}/cancel")
+            return {"ok": True, "aborted": True, "runIds": [run_id]}
+        except Exception:
+            return {"ok": False, "aborted": False, "runIds": []}
+
+    async def abort_active_session(self, ctx: RuntimeContext, session_key: str) -> dict:
+        """No direct session-level abort for shared hermes."""
+        return {"ok": True, "aborted": False, "runIds": []}
+
     def _map_event_to_compat_block(self, event: dict) -> str | None:
         event_type = str(event.get("type", ""))
         session_key = event.get("session_id") or event.get("session_key")

@@ -2,7 +2,7 @@
 """OpenClaw Docker 部署脚本。
 
 构建 openclaw 基础镜像并通过 docker compose 启动所有服务
-（postgres + gateway + frontend + shared-openclaw + manage-front + simple-front）。
+（postgres + gateway + frontend + manage-front + simple-front）。
 支持本地部署和远程服务器部署（通过 SSH）。
 
 用法:
@@ -437,7 +437,7 @@ def main():
     )
     parser.add_argument("--build-only", action="store_true", help="仅构建镜像，不启动服务")
     parser.add_argument("--restart", action="store_true", help="仅重启服务")
-    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (hermes,gateway,frontend,shared-openclaw,manage-front,simple-front)")
+    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (hermes,gateway,frontend,manage-front,simple-front)")
     parser.add_argument("--clean", action="store_true", help="停止所有服务并清理数据")
     parser.add_argument("--skip-base", action="store_true", help="跳过构建 Hermes dedicated bridge 基础镜像")
     parser.add_argument("--skip-health", action="store_true", help="跳过健康检查")

@@ -311,8 +311,7 @@ def _hermes_empty_compat(path: str, request: Request) -> JSONResponse | None:
         return JSONResponse({"results": [], "runtime": "hermes"})
     if path in {"marketplaces/skills/install", "marketplaces/recommended/install", "marketplaces/git/install-skills"} and request.method == "POST":
         return JSONResponse({"ok": False, "output": "Hermes runtime does not expose OpenClaw marketplace installation API", "installed": [], "errors": []})
-    if path == "marketplaces/recommended" and request.method == "GET":
-        return JSONResponse({"categories": [], "runtime": "hermes"})
+    # marketplaces/recommended is handled by openclaw_compat.router
     if path == "marketplaces/git/scan-skills" and request.method == "POST":
         return JSONResponse({"repo": "", "repoName": "", "skills": [], "cacheKey": "", "runtime": "hermes"})
     if path == "settings/gateway/restart" and request.method == "POST":

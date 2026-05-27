@@ -5,8 +5,15 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-_THINK_OPEN_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
-_THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+# Must stay in sync with hermes-agent/gateway/stream_consumer.py _OPEN_THINK_TAGS
+_THINK_OPEN_RE = re.compile(
+    r"<(?:think|thinking|thought|reasoning|REASONING_SCRATCHPAD)\b[^>]*>",
+    re.IGNORECASE,
+)
+_THINK_CLOSE_RE = re.compile(
+    r"</(?:think|thinking|thought|reasoning|REASONING_SCRATCHPAD)>",
+    re.IGNORECASE,
+)
 
 
 class HermesEventSanitizer:
@@ -47,8 +54,10 @@ class HermesEventSanitizer:
         event_type = event.get("type") or event.get("event")
         sanitized = dict(event)
 
+        # Pass reasoning events through so the frontend can render them
+        # in a collapsible card.
         if isinstance(event_type, str) and event_type.startswith("reasoning."):
-            return None
+            return sanitized
 
         if event_type == "message.delta":
             delta = event.get("delta")
@@ -126,13 +135,42 @@ def sanitize_hermes_message(message: dict[str, Any]) -> dict[str, Any]:
     if sanitized.get("role") == "assistant":
         content = sanitized.get("content")
         if isinstance(content, str):
+            # Extract thinking blocks into a dedicated field before stripping
+            thinking_parts: list[str] = []
+            pos = 0
+            text = content
+            while pos < len(text):
+                open_match = _THINK_OPEN_RE.search(text, pos)
+                if open_match is None:
+                    break
+                close_match = _THINK_CLOSE_RE.search(text, open_match.end())
+                if close_match is None:
+                    thinking_parts.append(text[open_match.end():])
+                    break
+                thinking_parts.append(text[open_match.end():close_match.start()])
+                pos = close_match.end()
+            if thinking_parts:
+                sanitized["_thinking"] = "\n".join(p.strip() for p in thinking_parts if p.strip())
             sanitized["content"] = strip_thinking_blocks(content)
-        sanitized.pop("reasoning", None)
+        # Preserve reasoning fields for frontend collapsible display
+        # (previously these were stripped with pop())
     return sanitized
 
 
 def sanitize_hermes_messages(messages: list[Any]) -> list[Any]:
-    return [sanitize_hermes_message(message) if isinstance(message, dict) else message for message in messages]
+    result = []
+    for message in messages:
+        if not isinstance(message, dict):
+            result.append(message)
+            continue
+        sanitized = sanitize_hermes_message(message)
+        # Drop assistant messages that became empty after stripping thinking blocks
+        if sanitized.get("role") == "assistant":
+            content = sanitized.get("content")
+            if isinstance(content, str) and not content.strip():
+                continue
+        result.append(sanitized)
+    return result
 
 
 def sanitize_run_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -2,6 +2,11 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
 WORKDIR /app
 
+# Install system dependencies (git + ssh needed for skills marketplace)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git openssh-client && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy dependency files first for better layer caching
 COPY pyproject.toml ./
 

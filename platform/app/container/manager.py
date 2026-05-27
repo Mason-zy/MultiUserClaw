@@ -83,6 +83,10 @@ def _data_volume_name(short_id: str) -> str:
     return f"{prefix}-{short_id}"
 
 
+def _hermes_home_volume_name(short_id: str) -> str:
+    return f"{_data_volume_name(short_id)}-home"
+
+
 def _internal_port() -> int:
     if _runtime_backend() == "hermes":
         return settings.dedicated_hermes_internal_port
@@ -95,10 +99,20 @@ def _runtime_image() -> str:
     return settings.openclaw_image
 
 
-def _runtime_mount_target() -> str:
+def _build_runtime_mounts(data_vol: str, short_id: str) -> list:
+    """Build volume mounts for the user container.
+
+    Hermes containers get two named volumes:
+      - ``/workspace``   — user workspace (skills, files, sessions)
+      - ``/opt/data``    — HERMES_HOME (profiles, config, skills cache)
+    """
+    mounts = [
+        docker.types.Mount("/workspace", data_vol, type="volume"),
+    ]
     if _runtime_backend() == "hermes":
-        return "/workspace"
-    return "/root/.openclaw"
+        home_vol = _hermes_home_volume_name(short_id)
+        mounts.append(docker.types.Mount("/opt/data", home_vol, type="volume"))
+    return mounts
 
 
 def _runtime_command() -> list[str]:
@@ -611,9 +625,7 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
         "name": container_name,
         "detach": True,
         "environment": container_env,
-        "mounts": [
-            docker.types.Mount(_runtime_mount_target(), data_vol, type="volume"),
-        ],
+        "mounts": _build_runtime_mounts(data_vol, short_id),
         "network": settings.container_network,
         "mem_limit": settings.container_memory_limit,
         "shm_size": settings.container_shm_size,
