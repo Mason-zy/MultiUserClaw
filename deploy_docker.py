@@ -2,7 +2,7 @@
 """OpenClaw Docker 部署脚本。
 
 构建 openclaw 基础镜像并通过 docker compose 启动所有服务
-（postgres + gateway + frontend + shared-openclaw + share-openclaw-front + manage-front + simple-front）。
+（postgres + gateway + frontend + shared-openclaw + manage-front + simple-front）。
 支持本地部署和远程服务器部署（通过 SSH）。
 
 用法:
@@ -25,7 +25,7 @@
   python deploy_docker.py --restart
 
   # 重建指定服务（逗号分隔，hermes 表示 Hermes 基础镜像）
-  python deploy_docker.py --rebuild hermes,gateway,frontend,manage-front,simple-front,shared-openclaw,share-openclaw-front
+  python deploy_docker.py --rebuild hermes,gateway,frontend,manage-front,simple-front
   python deploy_docker.py --rebuild gateway
   python deploy_docker.py --rebuild frontend
   python deploy_docker.py --rebuild hermes --with-browser
@@ -402,7 +402,7 @@ def health_check(host: str, gateway_port: int, frontend_port: int, retries: int 
     return True
 
 
-def show_status(compose_file: str, host: str, gateway_port: int, frontend_port: int, simple_port: int = 3082, share_front_port: int = 3083):
+def show_status(compose_file: str, host: str, gateway_port: int, frontend_port: int, simple_port: int = 3082):
     """显示部署状态摘要。"""
     compose_args = f"-f {compose_file}"
     print(f"\n{BOLD}{'=' * 50}{RESET}")
@@ -411,7 +411,6 @@ def show_status(compose_file: str, host: str, gateway_port: int, frontend_port: 
     print(f"  用户前端:        http://{host}:{frontend_port}")
     print(f"  简化版前端:      http://{host}:{simple_port}")
     print(f"  管理员前端:      http://{host}:3081")
-    print(f"  共享前端:        http://{host}:{share_front_port}")
     print(f"  共享Hermes(API): http://{host}:8080")
     print(f"  platform网关:    http://{host}:{gateway_port}")
     print(f"  使用的compose文件: {compose_file}")
@@ -438,7 +437,7 @@ def main():
     )
     parser.add_argument("--build-only", action="store_true", help="仅构建镜像，不启动服务")
     parser.add_argument("--restart", action="store_true", help="仅重启服务")
-    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (hermes,gateway,frontend,shared-openclaw,share-openclaw-front,manage-front,simple-front)")
+    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (hermes,gateway,frontend,shared-openclaw,manage-front,simple-front)")
     parser.add_argument("--clean", action="store_true", help="停止所有服务并清理数据")
     parser.add_argument("--skip-base", action="store_true", help="跳过构建 Hermes dedicated bridge 基础镜像")
     parser.add_argument("--skip-health", action="store_true", help="跳过健康检查")
@@ -464,7 +463,7 @@ def main():
 
     # 仅显示状态
     if args.status:
-        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082, share_front_port=3083)
+        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082)
         return
 
     check_prerequisites()
@@ -477,7 +476,7 @@ def main():
     # 重启
     if args.restart:
         restart_services(args.compose)
-        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082, share_front_port=3083)
+        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082)
         return
 
     # 重建指定服务（逗号分隔）
@@ -515,7 +514,7 @@ def main():
             run(f"docker compose {compose_args} up -d {services_str}")
             success(f"服务 {services_str} 已重建并启动")
 
-        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082, share_front_port=3083)
+        show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082)
         return
 
     check_env_file()
@@ -570,7 +569,7 @@ def main():
         check_host = "localhost" if args.host in ("0.0.0.0",) else args.host
         health_check(check_host, args.gateway_port, args.frontend_port)
 
-    show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082, share_front_port=3083)
+    show_status(args.compose, args.host, args.gateway_port, args.frontend_port, simple_port=3082)
 
 
 if __name__ == "__main__":
