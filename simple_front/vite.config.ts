@@ -2,13 +2,15 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+const apiTarget = process.env.VITE_API_URL || 'http://localhost:8080'
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    port: 3085,
+    port: 3082,
     proxy: {
       '/api/openclaw/events/stream': {
-        target: 'http://localhost:8080',
+        target: apiTarget,
         configure: (proxy: any) => {
           proxy.on('proxyRes', (proxyRes: any) => {
             proxyRes.headers['cache-control'] = 'no-cache'
@@ -17,10 +19,10 @@ export default defineConfig({
         },
       },
       '/api/openclaw/terminal/ws': {
-        target: 'http://localhost:8080',
+        target: apiTarget,
         ws: true,
       },
-      '/api': 'http://localhost:8080',
+      '/api': apiTarget,
     },
   },
 })

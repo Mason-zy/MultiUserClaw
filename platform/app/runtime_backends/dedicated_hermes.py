@@ -22,7 +22,13 @@ from app.runtime_backends.hermes_files import (
     read_data_file_from_hermes_container,
     write_upload_to_hermes_container,
 )
-from app.runtime_backends.hermes_agents import build_agent_info, model_for_session_key
+from app.runtime_backends.hermes_knowledge import build_knowledge_context
+from app.runtime_backends.hermes_agents import (
+    agent_id_from_session_key,
+    agent_identity_prompt_from_hermes_container,
+    list_agent_profiles_from_hermes_container,
+    model_for_session_key,
+)
 from app.runtime_backends.hermes_run import (
     HermesEventSanitizer,
     HermesRunTimingTracker,
@@ -34,6 +40,7 @@ from app.runtime_backends.hermes_run import (
     summarize_run_events,
 )
 from app.runtime_backends.hermes_skills import list_skills_from_hermes_container
+from app.runtime_backends.hermes_commands import list_hermes_commands_from_container
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,13 @@ LEGACY_OPENCLAW_SESSIONS_INDEX = "agents/main/sessions/sessions.json"
 
 def _is_generated_openclaw_session_key(session_key: str) -> bool:
     return session_key.startswith("agent:") and ":session-" in session_key
+
+
+def _fallback_title(message: str) -> str | None:
+    title = " ".join(message.strip().split())
+    if not title:
+        return None
+    return title[:48]
 
 
 def _empty_openclaw_session(session_key: str) -> dict[str, Any]:
@@ -114,6 +128,8 @@ class DedicatedHermesBackend:
         self._api_ready_keys: set[tuple[str, str]] = set()
         self._api_ready_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._clients: dict[tuple[str, str, int, float], HermesClient] = {}
+        self._pending_titles_by_run: dict[str, tuple[str, str]] = {}
+        self._agent_id_by_run: dict[str, str | None] = {}
 
     async def aclose(self) -> None:
         for client in self._clients.values():
@@ -144,7 +160,7 @@ class DedicatedHermesBackend:
             self._api_ready_keys.add(ready_key)
             logger.info(
                 "hermes_api_ready scope=%s user_id=%s elapsed_ms=%.1f base_url=%s runtime_id=%s",
-                "dedicated",
+                ctx.scope,
                 ctx.user.id,
                 _elapsed_ms(started_at),
                 base_url,
@@ -166,7 +182,7 @@ class DedicatedHermesBackend:
             )
         logger.info(
             "hermes_runtime_ready scope=%s user_id=%s elapsed_ms=%.1f host=%s port=%s",
-            "dedicated",
+            ctx.scope,
             ctx.user.id,
             _elapsed_ms(started_at),
             container.internal_host,
@@ -197,6 +213,7 @@ class DedicatedHermesBackend:
         return client
 
     async def _request(self, ctx: RuntimeContext, method: str, path: str, **kwargs) -> Any:
+        kwargs.pop("agent_id", None)
         client = await self._client(ctx)
         return await client.request(method, path, **kwargs)
 
@@ -212,11 +229,16 @@ class DedicatedHermesBackend:
 
     def _session_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
         message_count = payload.get("message_count")
+        created_at = payload.get("created_at")
         updated_at = payload.get("updated_at") or payload.get("last_message_at") or payload.get("created_at")
+        session_id = payload.get("session_id", "")
         return {
-            "key": payload.get("session_id", ""),
-            "sessionKey": payload.get("session_id", ""),
-            "title": payload.get("title") or payload.get("session_id", ""),
+            "key": session_id,
+            "sessionKey": session_id,
+            "title": payload.get("title") or session_id.rsplit(":", 1)[-1] or session_id,
+            "created_at": created_at,
+            "createdAt": created_at,
+            "updated_at": updated_at,
             "updatedAt": updated_at,
             "messageCount": message_count if isinstance(message_count, int) else len(payload.get("messages") or []),
         }
@@ -316,10 +338,12 @@ class DedicatedHermesBackend:
         }
 
     async def get_agent_info(self, ctx: RuntimeContext) -> dict:
-        payload = await (await self._client(ctx)).get_models()
-        models = payload.get("data") if isinstance(payload, dict) else []
-        return build_agent_info(
-            models if isinstance(models, list) else [],
+        async with async_session() as db:
+            container = await ensure_running(db, ctx.user.id)
+        return list_agent_profiles_from_hermes_container(
+            container.docker_id,
+            scope=ctx.scope,
+            runtime_mode=ctx.user.runtime_mode,
         )
 
     async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
@@ -365,7 +389,9 @@ class DedicatedHermesBackend:
             "title": payload.get("title") or payload.get("session_id", session_key),
             "messages": messages,
             "messageCount": payload.get("message_count", len(messages)),
+            "created_at": payload.get("created_at"),
             "createdAt": payload.get("created_at"),
+            "updated_at": payload.get("updated_at") or payload.get("last_message_at") or payload.get("created_at"),
             "updatedAt": payload.get("updated_at") or payload.get("last_message_at") or payload.get("created_at"),
         }
 
@@ -391,7 +417,7 @@ class DedicatedHermesBackend:
             if exc.status_code != status.HTTP_404_NOT_FOUND:
                 logger.debug(
                     "hermes_session_history_unavailable scope=%s user_id=%s session_key=%s status=%s",
-                    "dedicated",
+                    ctx.scope,
                     ctx.user.id,
                     session_key,
                     exc.status_code,
@@ -400,7 +426,7 @@ class DedicatedHermesBackend:
         except Exception as exc:
             logger.debug(
                 "hermes_session_history_unavailable scope=%s user_id=%s session_key=%s error=%s",
-                "dedicated",
+                ctx.scope,
                 ctx.user.id,
                 session_key,
                 exc,
@@ -411,19 +437,51 @@ class DedicatedHermesBackend:
 
     async def send_message(self, ctx: RuntimeContext, session_key: str, message: str) -> dict:
         started_at = time.perf_counter()
+        agent_id = agent_id_from_session_key(session_key)
         conversation_history = await self._conversation_history(ctx, session_key)
+        title = _fallback_title(message) if not conversation_history else None
+        async with async_session() as db:
+            container = await ensure_running(db, ctx.user.id)
+        instructions = agent_identity_prompt_from_hermes_container(container.docker_id, agent_id)
+        knowledge_write_instructions = (
+            "Knowledge base write policy:\n"
+            f"- This Agent's knowledge base root is /opt/data/profiles/{agent_id}/workspace/knowledge/.\n"
+            "- When the user asks to create, edit, or organize knowledge-base content, write Markdown files under that knowledge root.\n"
+            "- Do not create or modify skills for ordinary knowledge-base content unless the user explicitly asks to create a reusable skill.\n"
+            "- Do not ask the user to run sudo/chown for knowledge-base writes; use the writable knowledge root path."
+        )
+        instructions = f"{instructions}\n\n{knowledge_write_instructions}" if instructions else knowledge_write_instructions
+        knowledge_context = build_knowledge_context(container.docker_id, agent_id, message)
+        if knowledge_context:
+            instructions = f"{instructions}\n\n{knowledge_context}" if instructions else knowledge_context
         payload = await (await self._client(ctx)).create_run(
             message=message,
             session_id=session_key or None,
             session_key=session_key or None,
             model=model_for_session_key(session_key),
             conversation_history=conversation_history,
+            instructions=instructions,
         )
         run_id = payload.get("run_id") if isinstance(payload, dict) else None
         effective_session_key = payload.get("session_id") if isinstance(payload, dict) else None
+        if title and (effective_session_key or session_key):
+            if run_id:
+                self._pending_titles_by_run[run_id] = (effective_session_key or session_key, title)
+            try:
+                await self.rename_session(ctx, effective_session_key or session_key, title)
+            except Exception as exc:
+                logger.debug(
+                    "hermes_session_title_persist_failed scope=%s user_id=%s session_key=%s error=%s",
+                    ctx.scope,
+                    ctx.user.id,
+                    effective_session_key or session_key,
+                    exc,
+                )
+        if run_id:
+            self._agent_id_by_run[run_id] = agent_id
         logger.info(
             "hermes_run_started scope=%s user_id=%s session_key=%s run_id=%s elapsed_ms=%.1f",
-            "dedicated",
+            ctx.scope,
             ctx.user.id,
             effective_session_key or session_key,
             run_id or "",
@@ -435,6 +493,7 @@ class DedicatedHermesBackend:
             "runId": run_id or "",
             "session_key": effective_session_key or session_key,
             "sessionKey": effective_session_key or session_key,
+            "title": title,
             "raw": payload if isinstance(payload, dict) else {},
         }
 
@@ -449,9 +508,23 @@ class DedicatedHermesBackend:
         )
         events = sanitize_run_events(events)
         status_text, final_message = summarize_run_events(events)
+        pending_title = self._pending_titles_by_run.pop(run_id, None)
+        if pending_title:
+            session_key, title = pending_title
+            try:
+                await self.rename_session(ctx, session_key, title)
+            except Exception as exc:
+                logger.debug(
+                    "hermes_session_title_persist_after_run_failed scope=%s user_id=%s session_key=%s run_id=%s error=%s",
+                    ctx.scope,
+                    ctx.user.id,
+                    session_key,
+                    run_id,
+                    exc,
+                )
         logger.info(
             "hermes_run_finished scope=%s user_id=%s run_id=%s status=%s first_event_ms=%s first_delta_ms=%s first_visible_delta_ms=%s elapsed_ms=%.1f event_count=%d",
-            "dedicated",
+            ctx.scope,
             ctx.user.id,
             run_id,
             status_text,
@@ -469,13 +542,22 @@ class DedicatedHermesBackend:
         }
 
     async def rename_session(self, ctx: RuntimeContext, session_key: str, title: str):
-        payload = await self._request(ctx, "PUT", f"/api/hermes/sessions/{session_key}/title", json={"title": title})
+        payload = await self._request(
+            ctx,
+            "PUT",
+            f"/api/hermes/sessions/{session_key}/title",
+            json={"title": title},
+        )
         if isinstance(payload, dict):
             return payload
         return {"ok": True, "session_key": session_key, "title": title}
 
     async def delete_session(self, ctx: RuntimeContext, session_key: str):
-        payload = await self._request(ctx, "DELETE", f"/api/hermes/sessions/{session_key}")
+        payload = await self._request(
+            ctx,
+            "DELETE",
+            f"/api/hermes/sessions/{session_key}",
+        )
         if isinstance(payload, dict):
             return payload
         return {"ok": True, "session_key": session_key}
@@ -499,48 +581,25 @@ class DedicatedHermesBackend:
         """Best-effort abort: no direct hermes API for session-level abort."""
         return {"ok": True, "aborted": False, "runIds": []}
 
+    async def respond_run_approval(
+        self,
+        ctx: RuntimeContext,
+        run_id: str,
+        choice: str,
+        resolve_all: bool = False,
+    ) -> dict | list | str:
+        payload = await (await self._client(ctx)).request(
+            "POST",
+            f"/v1/runs/{run_id}/approval",
+            json={"choice": choice, "resolve_all": resolve_all},
+            timeout=10.0,
+        )
+        return payload if isinstance(payload, (dict, list, str)) else {"ok": True}
+
     async def list_commands(self, ctx: RuntimeContext, agent_id: str = "") -> dict:
-        """Build slash command list from skills installed in the user's container."""
-        from app.runtime_backends.hermes_skills import list_skills_from_hermes_container
-
-        # Built-in gateway commands useful in the web UI
-        builtin: list[dict] = [
-            {"name": "new", "description": "开始新会话", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
-            {"name": "retry", "description": "重试上一条消息", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
-            {"name": "undo", "description": "撤销上一轮对话", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
-            {"name": "title", "description": "设置会话标题", "argument_hint": "[name]", "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
-            {"name": "model", "description": "切换模型", "argument_hint": "[model]", "aliases": [], "category": "options", "scope": "both", "source": "builtin", "skill_name": None},
-            {"name": "help", "description": "显示帮助信息", "argument_hint": None, "aliases": [], "category": "status", "scope": "both", "source": "builtin", "skill_name": None},
-            {"name": "status", "description": "显示会话状态", "argument_hint": None, "aliases": [], "category": "status", "scope": "both", "source": "builtin", "skill_name": None},
-            {"name": "skills", "description": "管理技能", "argument_hint": "[list|search|install]", "aliases": [], "category": "tools", "scope": "both", "source": "builtin", "skill_name": None},
-            {"name": "stop", "description": "停止所有后台进程", "argument_hint": None, "aliases": [], "category": "session", "scope": "both", "source": "builtin", "skill_name": None},
-        ]
-
-        # Skill-based slash commands from the user's hermes container
-        skill_commands: list[dict] = []
-        try:
-            async with async_session() as db:
-                container = await ensure_running(db, ctx.user.id)
-            skills = list_skills_from_hermes_container(container.docker_id)
-            for skill in skills:
-                name = str(skill.get("name", ""))
-                if not name:
-                    continue
-                cmd_name = name.lower().replace("_", "-").replace(" ", "-")
-                skill_commands.append({
-                    "name": cmd_name,
-                    "description": str(skill.get("description", "")),
-                    "argument_hint": "<prompt>",
-                    "aliases": [],
-                    "category": "skills",
-                    "scope": "both",
-                    "source": "skill",
-                    "skill_name": name,
-                })
-        except Exception:
-            pass
-
-        return {"agentId": agent_id or "innovation", "commands": builtin + skill_commands}
+        async with async_session() as db:
+            container = await ensure_running(db, ctx.user.id)
+        return list_hermes_commands_from_container(container.docker_id, agent_id or "main")
 
     async def upload_file(
         self,
@@ -612,7 +671,7 @@ class DedicatedHermesBackend:
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
 
-        stream_ctx = RuntimeContext(user=user)
+        stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
         base_url = await self._resolve_base_url(stream_ctx)
         target_url = f"{base_url}/api/hermes/events/stream"
         headers = {}
@@ -668,7 +727,7 @@ class DedicatedHermesBackend:
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
 
-        stream_ctx = RuntimeContext(user=user)
+        stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
         target_url = f"{await self._resolve_base_url(stream_ctx)}/v1/runs/{run_id}/events"
         headers = {}
         if settings.dedicated_hermes_api_key:

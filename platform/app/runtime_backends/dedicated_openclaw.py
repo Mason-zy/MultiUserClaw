@@ -99,6 +99,21 @@ class DedicatedOpenClawBackend(RuntimeBackend):
     async def wait_run(self, ctx: RuntimeContext, run_id: str, timeout_ms: int):
         return await self._request(ctx, "GET", f"/api/runs/{run_id}/wait", params={"timeoutMs": timeout_ms}, timeout=(timeout_ms / 1000) + 5)
 
+    async def respond_run_approval(
+        self,
+        ctx: RuntimeContext,
+        run_id: str,
+        choice: str,
+        resolve_all: bool = False,
+    ):
+        return await self._request(
+            ctx,
+            "POST",
+            f"/api/runs/{run_id}/approval",
+            json={"choice": choice, "resolve_all": resolve_all},
+            timeout=10.0,
+        )
+
     async def rename_session(self, ctx: RuntimeContext, session_key: str, title: str):
         return await self._request(ctx, "PUT", f"/api/sessions/{session_key}/title", json={"title": title})
 

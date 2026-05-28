@@ -28,6 +28,14 @@ class RuntimeBackend(Protocol):
 
     async def wait_run(self, ctx: RuntimeContext, run_id: str, timeout_ms: int) -> dict | list | str: ...
 
+    async def respond_run_approval(
+        self,
+        ctx: RuntimeContext,
+        run_id: str,
+        choice: str,
+        resolve_all: bool = False,
+    ) -> dict | list | str: ...
+
     async def rename_session(self, ctx: RuntimeContext, session_key: str, title: str) -> dict | list | str: ...
 
     async def delete_session(self, ctx: RuntimeContext, session_key: str) -> dict | list | str: ...

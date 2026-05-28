@@ -1,0 +1,4 @@
+interface:
+  display_name: "Container Build Guard"
+  short_description: "Preflight networks and run long image builds safely."
+  default_prompt: "Guard this repository's container image build: check network blockers and risky external sources before building, then recommend or use a foreground log-wrapped build command that preserves the exit code."
