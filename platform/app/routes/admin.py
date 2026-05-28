@@ -15,7 +15,8 @@ from app.auth.dependencies import require_admin
 from app.auth.service import get_user_by_email, get_user_by_username, hash_password
 from app.container.manager import destroy_container, pause_container, resume_container
 from app.db.engine import get_db
-from app.db.models import AuditLog, Container, UsageRecord, User
+from app.db.models import AuditLog, Container, ModelProviderConfig, UsageRecord, User
+from app.model_config import get_model_config_payload, set_default_model
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -60,6 +61,27 @@ class CreateUserRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     new_password: str
+
+
+class ModelItemRequest(BaseModel):
+    id: str
+    name: str | None = None
+    enabled: bool = True
+
+
+class ProviderConfigRequest(BaseModel):
+    name: str | None = None
+    providerType: str | None = None
+    api: str | None = None
+    baseUrl: str | None = None
+    apiKey: str | None = None
+    models: list[ModelItemRequest] = []
+    enabled: bool = True
+
+
+class ModelsConfigRequest(BaseModel):
+    defaultModel: str | None = None
+    providers: dict[str, ProviderConfigRequest] | None = None
 
 
 async def _sync_container_status(db: AsyncSession, docker_id: str, db_status: str | None) -> str | None:
@@ -365,6 +387,67 @@ async def sync_single_container_status(
     return {"status": real_status, "docker_id": container.docker_id}
 
 
+@router.get("/models")
+async def get_models_config(db: AsyncSession = Depends(get_db)):
+    return await get_model_config_payload(db, include_secret=False)
+
+
+@router.put("/models")
+async def update_models_config(
+    req: ModelsConfigRequest,
+    db: AsyncSession = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+):
+    if req.providers is not None:
+        existing = {
+            provider.id: provider
+            for provider in (await db.execute(select(ModelProviderConfig))).scalars().all()
+        }
+        seen: set[str] = set()
+        for provider_id, payload in req.providers.items():
+            clean_id = provider_id.strip().lower()
+            if not clean_id:
+                raise HTTPException(status_code=400, detail="Provider id is required")
+            seen.add(clean_id)
+            models = [
+                {"id": item.id.strip(), "name": (item.name or item.id).strip(), "enabled": item.enabled}
+                for item in payload.models
+                if item.id.strip()
+            ]
+            if not models:
+                raise HTTPException(status_code=400, detail=f"Provider {clean_id} must include at least one model")
+            provider = existing.get(clean_id)
+            if provider is None:
+                provider = ModelProviderConfig(id=clean_id, display_name=payload.name or clean_id)
+                db.add(provider)
+            provider.display_name = (payload.name or clean_id).strip()
+            provider.provider_type = (payload.providerType or payload.api or clean_id).strip()
+            provider.api_base = (payload.baseUrl or "").strip() or None
+            if payload.apiKey is not None and payload.apiKey.strip():
+                provider.api_key = payload.apiKey.strip()
+            provider.models = models
+            provider.enabled = payload.enabled
+
+        for provider_id, provider in existing.items():
+            if provider_id not in seen:
+                await db.delete(provider)
+
+        await db.commit()
+
+    if req.defaultModel:
+        await set_default_model(db, req.defaultModel.strip())
+
+    await write_audit_log(
+        db,
+        action="model_config_update",
+        user_id=admin_user.id,
+        resource="models",
+        detail={"defaultModel": req.defaultModel, "providersUpdated": req.providers is not None},
+    )
+    await db.commit()
+    return {"ok": True, **await get_model_config_payload(db, include_secret=False)}
+
+
 @router.post("/users/{user_id}/container/pause")
 async def pause_user_container(
     user_id: str,
@@ -472,13 +555,18 @@ async def usage_history(
     # --- By model aggregation ---
     model_q = (
         select(
+            UsageRecord.user_id,
+            User.username.label("username"),
             UsageRecord.model,
+            UsageRecord.provider_id,
+            UsageRecord.upstream_model,
             func.coalesce(func.sum(UsageRecord.input_tokens), 0).label("input_tokens"),
             func.coalesce(func.sum(UsageRecord.output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(UsageRecord.total_tokens), 0).label("total_tokens"),
         )
+        .join(User, User.id == UsageRecord.user_id, isouter=True)
         .where(UsageRecord.created_at >= cutoff)
-        .group_by(UsageRecord.model)
+        .group_by(UsageRecord.user_id, User.username, UsageRecord.model, UsageRecord.provider_id, UsageRecord.upstream_model)
         .order_by(func.sum(UsageRecord.total_tokens).desc())
     )
     if user_id:
@@ -487,7 +575,11 @@ async def usage_history(
     model_rows = (await db.execute(model_q)).all()
     by_model = [
         {
+            "user_id": r.user_id,
+            "username": r.username,
             "model": r.model,
+            "provider_id": r.provider_id,
+            "upstream_model": r.upstream_model,
             "input_tokens": r.input_tokens,
             "output_tokens": r.output_tokens,
             "total_tokens": r.total_tokens,

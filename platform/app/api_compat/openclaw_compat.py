@@ -59,6 +59,7 @@ class SessionTitleRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     message: str
+    model: str | None = None
 
 
 class CreateAgentRequest(BaseModel):
@@ -533,7 +534,7 @@ async def send_dedicated_message(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    result = await backend.send_message(RuntimeContext(user=user), session_key, req.message)
+    result = await backend.send_message(RuntimeContext(user=user), session_key, req.message, req.model)
     if isinstance(result, dict) and not result.get("title"):
         result["title"] = _fallback_title(req.message)
     return result
@@ -555,7 +556,7 @@ async def dedicated_run_events_stream(
     request: Request,
     token: str = "",
 ):
-    user = User(id="", username="", email="", password_hash="", runtime_mode="dedicated")
+    user = User(id="", username="", email="", password_hash="")
     backend = get_runtime_backend()
     return await backend.stream_run_events(RuntimeContext(user=user), request, token, run_id)
 
@@ -741,6 +742,6 @@ async def dedicated_events_stream(
     token: str = "",
 ):
     # user is recovered inside backend from token for EventSource compatibility
-    user = User(id="", username="", email="", password_hash="", runtime_mode="dedicated")
+    user = User(id="", username="", email="", password_hash="")
     backend = get_runtime_backend()
     return await backend.stream_events(RuntimeContext(user=user), request, token)

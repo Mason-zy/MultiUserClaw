@@ -35,6 +35,7 @@ from app.config import settings
 from app.container.manager import ensure_running, get_container, get_docker_container
 from app.db.engine import async_session, get_db
 from app.db.models import User
+from app.model_config import get_model_config_payload
 from app.runtime_backends.hermes_files import normalize_hermes_filemanager_path, read_file_from_hermes_container
 
 logger = logging.getLogger("platform.routes.proxy")
@@ -194,24 +195,13 @@ async def _hermes_request(method: str, base_url: str, path: str, **kwargs) -> ht
 
 
 async def _proxy_hermes_models(base_url: str) -> JSONResponse:
-    response = await _hermes_request("GET", base_url, "/v1/models")
-    if response.status_code >= 400:
-        return JSONResponse(
-            status_code=response.status_code,
-            content={"models": [], "configuredModel": settings.default_model, "configuredProviders": {}},
-        )
-    payload = _safe_json_payload(response)
-    raw_models = payload.get("data") if isinstance(payload, dict) else []
-    models = [
-        mapped
-        for mapped in (_hermes_model_to_openclaw_model(item) for item in raw_models or [])
-        if mapped is not None
-    ]
+    _ = base_url
+    async with async_session() as db:
+        payload = await get_model_config_payload(db, include_secret=False)
     return JSONResponse(
         {
-            "models": models,
-            "configuredModel": settings.default_model,
-            "configuredProviders": {"hermes": {"configured": True}},
+            "models": payload.get("models", []),
+            "configuredModel": payload.get("configuredModel", settings.default_model),
             "runtime": "hermes",
         }
     )

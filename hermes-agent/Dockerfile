@@ -11,14 +11,19 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+ARG APT_DEBIAN_MIRROR=http://mirrors.ustc.edu.cn/debian
+ARG APT_SECURITY_MIRROR=http://mirrors.ustc.edu.cn/debian-security
 ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 
 # Install system dependencies in one layer, clear APT cache
 # tini reaps orphaned zombie processes (MCP stdio subprocesses, git, bun, etc.)
 # that would otherwise accumulate when hermes runs as PID 1. See #15012.
-RUN sed -i 's|http://deb.debian.org|http://mirrors.163.com|g' /etc/apt/sources.list.d/debian.sources && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
+RUN sed -i \
+        -e "s|http://deb.debian.org/debian|${APT_DEBIAN_MIRROR}|g" \
+        -e "s|http://deb.debian.org/debian-security|${APT_SECURITY_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources && \
+    apt-get -o Acquire::Retries=5 update && \
+    apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends \
     build-essential curl nodejs npm python3 python3-pip ripgrep ffmpeg gcc python3-dev libffi-dev procps git tini chromium pandoc gosu && \
     rm -rf /var/lib/apt/lists/*
 
@@ -70,3 +75,31 @@ RUN npm install --prefer-offline --no-audit && \
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
 RUN uv sync --no-install-project --extra all
+
+COPY . /opt/hermes
+
+# Build frontend assets (web dashboard + terminal UI)
+RUN cd web && npm run build && \
+    cd ../ui-tui && npm run build
+
+# Permissions: make .venv and node_modules writable by hermes user
+# (needed for lazy runtime installs and for TUI dependency checks).
+RUN chmod -R a+rX /opt/hermes && \
+    chown -R hermes:hermes /opt/hermes/.venv /opt/hermes/ui-tui /opt/hermes/node_modules && \
+    chmod +x /opt/hermes/docker/entrypoint.sh
+
+ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
+ENV HERMES_HOME=/opt/data
+ENV PATH="/opt/data/.local/bin:${PATH}"
+VOLUME [ "/opt/data" ]
+ENTRYPOINT [ "/opt/hermes/docker/entrypoint.sh" ]
+
+ENV API_SERVER_ENABLED=true
+ENV API_SERVER_HOST=0.0.0.0
+ENV API_SERVER_PORT=18080
+ENV API_SERVER_KEY=dev-hermes-bridge-key
+ENV GATEWAY_ALLOW_ALL_USERS=true
+
+EXPOSE 18080
+
+CMD ["gateway", "run"]

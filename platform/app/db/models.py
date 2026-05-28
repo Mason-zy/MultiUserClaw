@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Integer,
+    JSON,
     String,
     Text,
     func,
@@ -78,10 +79,29 @@ class UsageRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    upstream_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ModelProviderConfig(Base):
+    """Admin-managed LLM provider configuration."""
+
+    __tablename__ = "model_provider_configs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_type: Mapped[str] = mapped_column(String(32), nullable=False, default="openai")
+    api_base: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    models: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class AuditLog(Base):

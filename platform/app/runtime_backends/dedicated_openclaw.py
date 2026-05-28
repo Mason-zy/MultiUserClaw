@@ -92,8 +92,11 @@ class DedicatedOpenClawBackend(RuntimeBackend):
     async def get_session(self, ctx: RuntimeContext, session_key: str):
         return await self._request(ctx, "GET", f"/api/sessions/{session_key}")
 
-    async def send_message(self, ctx: RuntimeContext, session_key: str, message: str) -> dict:
-        payload = await self._request(ctx, "POST", f"/api/sessions/{session_key}/messages", json={"message": message}, timeout=300.0)
+    async def send_message(self, ctx: RuntimeContext, session_key: str, message: str, model: str | None = None) -> dict:
+        body = {"message": message}
+        if model:
+            body["model"] = model
+        payload = await self._request(ctx, "POST", f"/api/sessions/{session_key}/messages", json=body, timeout=300.0)
         return payload if isinstance(payload, dict) else {}
 
     async def wait_run(self, ctx: RuntimeContext, run_id: str, timeout_ms: int):

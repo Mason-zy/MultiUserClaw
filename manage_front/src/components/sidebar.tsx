@@ -9,12 +9,14 @@ import {
   Server,
   BarChart3,
   ScrollText,
+  Brain,
 } from "lucide-react";
 
 const navItems = [
   { href: "/dashboard", label: "仪表盘", icon: LayoutDashboard },
   { href: "/users", label: "用户管理", icon: Users },
   { href: "/containers", label: "容器管理", icon: Server },
+  { href: "/models", label: "模型配置", icon: Brain },
   { href: "/usage", label: "用量统计", icon: BarChart3 },
   { href: "/audit", label: "审计日志", icon: ScrollText },
 ];

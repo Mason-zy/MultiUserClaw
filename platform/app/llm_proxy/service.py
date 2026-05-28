@@ -17,7 +17,9 @@ import logging
 import time
 from datetime import datetime
 from functools import lru_cache
+from typing import Any
 
+import httpx
 import litellm
 from fastapi import HTTPException, status
 from litellm import acompletion
@@ -27,7 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import write_audit_log
 from app.auth.service import decode_token
 from app.config import settings
-from app.db.models import Container, UsageRecord, User
+from app.db.models import Container, ModelProviderConfig, UsageRecord, User
+from app.model_config import resolve_model_provider
 
 logger = logging.getLogger("platform.llm_proxy")
 
@@ -117,7 +120,7 @@ for _p in _PROVIDERS:
         _KEYWORD_MAP[_kw] = _p
 
 
-def _normalize_minimax_api_base(api_base: str | None) -> str | None:
+def _normalize_minimax_openai_api_base(api_base: str | None) -> str | None:
     if not api_base:
         return api_base
     normalized = api_base.strip().rstrip("/")
@@ -130,6 +133,17 @@ def _normalize_minimax_api_base(api_base: str | None) -> str | None:
     return normalized
 
 
+def _normalize_anthropic_api_base(api_base: str | None) -> str | None:
+    if not api_base:
+        return api_base
+    normalized = api_base.strip().rstrip("/")
+    if normalized.endswith("/v1/messages"):
+        return normalized[: -len("/v1/messages")]
+    if normalized.endswith("/v1") and "/anthropic" in normalized.lower():
+        return normalized[: -len("/v1")]
+    return normalized
+
+
 def _get_provider_key_base_and_headers(provider: dict) -> tuple[str, str | None, dict[str, str] | None]:
     api_key = getattr(settings, provider["key_attr"], "") or ""
     if "api_base_attr" in provider:
@@ -137,7 +151,7 @@ def _get_provider_key_base_and_headers(provider: dict) -> tuple[str, str | None,
     else:
         api_base = provider.get("api_base")
     if provider["prefix"] == "minimax":
-        api_base = _normalize_minimax_api_base(api_base)
+        api_base = _normalize_minimax_openai_api_base(api_base)
     if not api_key and provider["prefix"] == "vllm":
         api_key = "dummy"
     return api_key, api_base, None
@@ -191,6 +205,42 @@ def _resolve_provider(model: str) -> tuple[str, str, str | None, dict[str, str] 
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=f"No provider configured for model '{model}'",
     )
+
+
+def _resolve_configured_provider(provider: ModelProviderConfig, model_id: str) -> tuple[str, str, str | None, dict[str, str] | None]:
+    api_key = provider.api_key or ""
+    api_base = provider.api_base or None
+    provider_type = (provider.provider_type or provider.id or "").strip().lower()
+    if provider_type == "anthropic":
+        litellm_model = model_id if model_id.startswith("claude") else f"anthropic/{model_id}"
+    elif provider_type == "openai":
+        litellm_model = f"openai/{model_id}"
+    elif provider_type == "deepseek":
+        litellm_model = f"deepseek/{model_id}"
+    elif provider_type == "minimax":
+        litellm_model = f"minimax/{_maybe_use_minimax_highspeed(model_id)}"
+        api_base = _normalize_minimax_openai_api_base(api_base)
+    elif provider_type == "minimax-cn":
+        litellm_model = model_id
+        api_base = _normalize_anthropic_api_base(api_base or "https://api.minimaxi.com/anthropic")
+    elif provider_type == "openrouter":
+        litellm_model = f"openrouter/{model_id}"
+        api_base = None
+    elif provider_type in {"kimi", "moonshot", "zhipu", "doubao", "dashscope", "aihubmix", "custom"}:
+        litellm_model = f"openai/{model_id}"
+    elif provider_type == "vllm":
+        litellm_model = f"hosted_vllm/{model_id}"
+        api_key = api_key or "dummy"
+    else:
+        litellm_model = f"openai/{model_id}"
+    logger.info("模型路由: %s/%s -> %s (litellm=%s)", provider.id, model_id, provider_type, litellm_model)
+    return litellm_model, api_key, api_base, None
+
+
+def _provider_uses_anthropic_messages(provider: ModelProviderConfig | None, api_base: str | None) -> bool:
+    provider_type = ((provider.provider_type if provider is not None else "") or "").strip().lower()
+    normalized_base = (api_base or "").strip().rstrip("/").lower()
+    return provider_type in {"minimax-cn", "anthropic_messages"} or normalized_base.endswith("/anthropic")
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +357,207 @@ def _apply_platform_generation_defaults(kwargs: dict, litellm_model: str, api_ba
         kwargs["service_tier"] = service_tier
 
 
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return "" if content is None else str(content)
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "text" and item.get("text") is not None:
+                parts.append(str(item.get("text")))
+        elif isinstance(item, str):
+            parts.append(item)
+    return "\n".join(part for part in parts if part)
+
+
+def _openai_messages_to_anthropic(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
+    system_parts: list[str] = []
+    anthropic_messages: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip()
+        content = _content_to_text(message.get("content"))
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+        elif role in {"user", "assistant"}:
+            anthropic_messages.append({"role": role, "content": content})
+        elif role == "tool":
+            anthropic_messages.append({"role": "user", "content": content})
+    return ("\n\n".join(system_parts) if system_parts else None), anthropic_messages
+
+
+def _anthropic_usage_tokens(usage: Any) -> tuple[int, int]:
+    if not isinstance(usage, dict):
+        return 0, 0
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    return (
+        int(input_tokens) if isinstance(input_tokens, (int, float)) else 0,
+        int(output_tokens) if isinstance(output_tokens, (int, float)) else 0,
+    )
+
+
+def _anthropic_content_text(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for item in payload.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            text = item.get("text")
+            if text is not None:
+                parts.append(str(text))
+    return "".join(parts)
+
+
+def _chat_completion_payload_from_anthropic(payload: dict[str, Any], model: str) -> dict[str, Any]:
+    input_tokens, output_tokens = _anthropic_usage_tokens(payload.get("usage"))
+    return {
+        "id": payload.get("id") or f"chatcmpl-platform-{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": _anthropic_content_text(payload),
+            },
+            "finish_reason": "stop" if payload.get("stop_reason") in {None, "end_turn"} else payload.get("stop_reason"),
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
+
+
+async def _single_chunk_stream(payload: dict[str, Any], model: str):
+    import json
+
+    text = _anthropic_content_text(payload)
+    created = int(time.time())
+    chunk_id = payload.get("id") or f"chatcmpl-platform-{created}"
+    if text:
+        chunk = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": text},
+                "finish_reason": None,
+            }],
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+
+    input_tokens, output_tokens = _anthropic_usage_tokens(payload.get("usage"))
+    final_chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop" if payload.get("stop_reason") in {None, "end_turn"} else payload.get("stop_reason"),
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
+    yield f"data: {json.dumps(final_chunk)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def _call_anthropic_messages(
+    *,
+    model: str,
+    api_key: str,
+    api_base: str,
+    raw_request: dict,
+) -> dict[str, Any]:
+    system_prompt, messages = _openai_messages_to_anthropic(raw_request.get("messages") or [])
+    if not messages:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing Anthropic messages")
+    max_tokens = raw_request.get("max_tokens") or raw_request.get("max_completion_tokens") or 4096
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }
+    if system_prompt:
+        body["system"] = system_prompt
+    for key in ("temperature", "top_p", "stop"):
+        if key in raw_request:
+            body[key] = raw_request[key]
+
+    url = f"{_normalize_anthropic_api_base(api_base).rstrip('/')}/v1/messages"
+    headers = {
+        "authorization": f"Bearer {api_key}",
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.post(url, headers=headers, json=body)
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = {"error": resp.text}
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Anthropic-compatible provider error: HTTP {resp.status_code}: {payload}",
+        )
+    return payload if isinstance(payload, dict) else {"content": []}
+
+
+async def _record_usage(
+    db: AsyncSession,
+    *,
+    user: User | None,
+    model: str,
+    provider_id: str | None,
+    upstream_model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    stream: bool,
+) -> None:
+    total = input_tokens + output_tokens
+    if user is None or total <= 0:
+        return
+    db.add(UsageRecord(
+        user_id=user.id,
+        model=model,
+        provider_id=provider_id,
+        upstream_model=upstream_model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total,
+    ))
+    await write_audit_log(
+        db,
+        action="llm_call",
+        user_id=user.id,
+        resource=model,
+        detail={
+            "stream": stream,
+            "provider_id": provider_id,
+            "upstream_model": upstream_model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total,
+        },
+    )
+    await db.commit()
+
+
 async def proxy_chat_completion(
     db: AsyncSession,
     container_token: str,
@@ -359,8 +610,54 @@ async def proxy_chat_completion(
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account disabled")
             await _check_quota(db, user)
 
-    # 2. Resolve provider
-    litellm_model, api_key, api_base, extra_headers = _resolve_provider(model)
+    # 2. Resolve provider. Admin-managed DB config is authoritative; legacy
+    # env-var routing remains as a fallback for older deployments.
+    provider_config: ModelProviderConfig | None = None
+    configured_model_id: str | None = None
+    try:
+        provider_config, configured_model_id = await resolve_model_provider(db, model)
+        litellm_model, api_key, api_base, extra_headers = _resolve_configured_provider(provider_config, configured_model_id)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_400_BAD_REQUEST:
+            raise
+        litellm_model, api_key, api_base, extra_headers = _resolve_provider(model)
+    except Exception:
+        litellm_model, api_key, api_base, extra_headers = _resolve_provider(model)
+
+    if provider_config is not None and _provider_uses_anthropic_messages(provider_config, api_base):
+        original_stream = bool(stream)
+        if original_stream:
+            raw_request = dict(raw_request)
+            raw_request["stream"] = False
+        try:
+            anthropic_payload = await _call_anthropic_messages(
+                model=litellm_model,
+                api_key=api_key,
+                api_base=api_base or "",
+                raw_request=raw_request,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Anthropic-compatible LLM 调用失败: model=%s, 错误=%s", model, e)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"LLM provider error: {e}",
+            )
+        input_tokens, output_tokens = _anthropic_usage_tokens(anthropic_payload.get("usage"))
+        await _record_usage(
+            db,
+            user=user,
+            model=model,
+            provider_id=provider_config.id,
+            upstream_model=litellm_model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            stream=original_stream,
+        )
+        if original_stream:
+            return _single_chunk_stream(anthropic_payload, model)
+        return _chat_completion_payload_from_anthropic(anthropic_payload, model)
 
     # 3. Build kwargs — pass through all known OpenAI-compatible params
     kwargs: dict = {
@@ -444,24 +741,16 @@ async def proxy_chat_completion(
                 total = total_input + total_output
                 if user is not None and total > 0:
                     try:
-                        db.add(UsageRecord(
-                            user_id=user.id, model=model,
-                            input_tokens=total_input, output_tokens=total_output,
-                            total_tokens=total,
-                        ))
-                        await write_audit_log(
+                        await _record_usage(
                             db,
-                            action="llm_call",
-                            user_id=user.id,
-                            resource=model,
-                            detail={
-                                "stream": True,
-                                "input_tokens": total_input,
-                                "output_tokens": total_output,
-                                "total_tokens": total,
-                            },
+                            user=user,
+                            model=model,
+                            provider_id=provider_config.id if provider_config is not None else None,
+                            upstream_model=litellm_model,
+                            input_tokens=total_input,
+                            output_tokens=total_output,
+                            stream=True,
                         )
-                        await db.commit()
                     except Exception as e:
                         logger.warning("Failed to record streaming usage: %s", e)
 
@@ -470,25 +759,16 @@ async def proxy_chat_completion(
     # 6. Record usage (non-streaming)
     usage = getattr(response, "usage", None)
     if user is not None and usage:
-        db.add(UsageRecord(
-            user_id=user.id, model=model,
+        await _record_usage(
+            db,
+            user=user,
+            model=model,
+            provider_id=provider_config.id if provider_config is not None else None,
+            upstream_model=litellm_model,
             input_tokens=usage.prompt_tokens or 0,
             output_tokens=usage.completion_tokens or 0,
-            total_tokens=usage.total_tokens or 0,
-        ))
-        await write_audit_log(
-            db,
-            action="llm_call",
-            user_id=user.id,
-            resource=model,
-            detail={
-                "stream": False,
-                "input_tokens": usage.prompt_tokens or 0,
-                "output_tokens": usage.completion_tokens or 0,
-                "total_tokens": usage.total_tokens or 0,
-            },
+            stream=False,
         )
-        await db.commit()
 
     # 7. Update container last_active_at
     if container is not None:

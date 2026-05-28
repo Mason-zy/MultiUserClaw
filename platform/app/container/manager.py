@@ -117,7 +117,7 @@ def _build_runtime_mounts(data_vol: str, short_id: str) -> list:
 
 def _runtime_command() -> list[str]:
     if _runtime_backend() == "hermes":
-        return []
+        return ["gateway", "run"]
     return ["node", "bridge/dist/bridge/start.js"]
 
 

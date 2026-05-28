@@ -79,7 +79,7 @@ def test_hermes_runtime_switches_internal_port_publish(monkeypatch):
     monkeypatch.setattr(manager.settings, "user_container_bind_ip", "127.0.0.1")
 
     assert manager._internal_port() == 18123
-    assert manager._runtime_command() == []
+    assert manager._runtime_command() == ["gateway", "run"]
     assert manager._runtime_published_ports() == {"18123/tcp": ("127.0.0.1", None)}
     assert manager._runtime_preferred_ports(5901, 30001) is None
 

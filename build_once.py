@@ -28,6 +28,9 @@ DOCKERHUB_MIRRORS = [
     "docker.1ms.run",
 ]
 
+DEFAULT_APT_DEBIAN_MIRROR = "http://mirrors.ustc.edu.cn/debian"
+DEFAULT_APT_SECURITY_MIRROR = "http://mirrors.ustc.edu.cn/debian-security"
+
 
 @dataclass(frozen=True)
 class ImageSpec:
@@ -170,10 +173,27 @@ def sync_deploy_copy() -> None:
 
 def build_images(host: str, gateway_port: int, relative_api: bool) -> None:
     api_url = "" if relative_api else f"http://{host}:{gateway_port}"
-    env = {"VITE_API_URL": api_url}
+    env = {
+        "VITE_API_URL": api_url,
+        "APT_DEBIAN_MIRROR": os.environ.get("APT_DEBIAN_MIRROR", DEFAULT_APT_DEBIAN_MIRROR),
+        "APT_SECURITY_MIRROR": os.environ.get("APT_SECURITY_MIRROR", DEFAULT_APT_SECURITY_MIRROR),
+    }
     sync_deploy_copy()
     log_wrapped(
-        ["docker", "build", "--progress=plain", "-t", "hermes-base:latest", "-f", "hermes-agent/Dockerfile", "hermes-agent/"],
+        [
+            "docker",
+            "build",
+            "--progress=plain",
+            "--build-arg",
+            f"APT_DEBIAN_MIRROR={env['APT_DEBIAN_MIRROR']}",
+            "--build-arg",
+            f"APT_SECURITY_MIRROR={env['APT_SECURITY_MIRROR']}",
+            "-t",
+            "hermes-base:latest",
+            "-f",
+            "hermes-agent/Dockerfile",
+            "hermes-agent/",
+        ],
         "hermes-base",
         2700,
     )

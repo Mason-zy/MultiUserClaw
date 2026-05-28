@@ -45,6 +45,7 @@ from app.runtime_backends.hermes_commands import list_hermes_commands_from_conta
 logger = logging.getLogger(__name__)
 
 LEGACY_OPENCLAW_SESSIONS_INDEX = "agents/main/sessions/sessions.json"
+RUNTIME_SCOPE = "dedicated"
 
 
 def _is_generated_openclaw_session_key(session_key: str) -> bool:
@@ -160,7 +161,7 @@ class DedicatedHermesBackend:
             self._api_ready_keys.add(ready_key)
             logger.info(
                 "hermes_api_ready scope=%s user_id=%s elapsed_ms=%.1f base_url=%s runtime_id=%s",
-                ctx.scope,
+                RUNTIME_SCOPE,
                 ctx.user.id,
                 _elapsed_ms(started_at),
                 base_url,
@@ -182,7 +183,7 @@ class DedicatedHermesBackend:
             )
         logger.info(
             "hermes_runtime_ready scope=%s user_id=%s elapsed_ms=%.1f host=%s port=%s",
-            ctx.scope,
+            RUNTIME_SCOPE,
             ctx.user.id,
             _elapsed_ms(started_at),
             container.internal_host,
@@ -342,8 +343,8 @@ class DedicatedHermesBackend:
             container = await ensure_running(db, ctx.user.id)
         return list_agent_profiles_from_hermes_container(
             container.docker_id,
-            scope=ctx.scope,
-            runtime_mode=ctx.user.runtime_mode,
+            scope=RUNTIME_SCOPE,
+            runtime_mode=RUNTIME_SCOPE,
         )
 
     async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
@@ -417,7 +418,7 @@ class DedicatedHermesBackend:
             if exc.status_code != status.HTTP_404_NOT_FOUND:
                 logger.debug(
                     "hermes_session_history_unavailable scope=%s user_id=%s session_key=%s status=%s",
-                    ctx.scope,
+                    RUNTIME_SCOPE,
                     ctx.user.id,
                     session_key,
                     exc.status_code,
@@ -426,7 +427,7 @@ class DedicatedHermesBackend:
         except Exception as exc:
             logger.debug(
                 "hermes_session_history_unavailable scope=%s user_id=%s session_key=%s error=%s",
-                ctx.scope,
+                RUNTIME_SCOPE,
                 ctx.user.id,
                 session_key,
                 exc,
@@ -435,7 +436,7 @@ class DedicatedHermesBackend:
         messages = payload.get("messages") if isinstance(payload, dict) else []
         return self._conversation_history_from_messages(messages if isinstance(messages, list) else [])
 
-    async def send_message(self, ctx: RuntimeContext, session_key: str, message: str) -> dict:
+    async def send_message(self, ctx: RuntimeContext, session_key: str, message: str, model: str | None = None) -> dict:
         started_at = time.perf_counter()
         agent_id = agent_id_from_session_key(session_key)
         conversation_history = await self._conversation_history(ctx, session_key)
@@ -458,7 +459,7 @@ class DedicatedHermesBackend:
             message=message,
             session_id=session_key or None,
             session_key=session_key or None,
-            model=model_for_session_key(session_key),
+            model=model or model_for_session_key(session_key),
             conversation_history=conversation_history,
             instructions=instructions,
         )
@@ -472,7 +473,7 @@ class DedicatedHermesBackend:
             except Exception as exc:
                 logger.debug(
                     "hermes_session_title_persist_failed scope=%s user_id=%s session_key=%s error=%s",
-                    ctx.scope,
+                    RUNTIME_SCOPE,
                     ctx.user.id,
                     effective_session_key or session_key,
                     exc,
@@ -481,7 +482,7 @@ class DedicatedHermesBackend:
             self._agent_id_by_run[run_id] = agent_id
         logger.info(
             "hermes_run_started scope=%s user_id=%s session_key=%s run_id=%s elapsed_ms=%.1f",
-            ctx.scope,
+            RUNTIME_SCOPE,
             ctx.user.id,
             effective_session_key or session_key,
             run_id or "",
@@ -516,7 +517,7 @@ class DedicatedHermesBackend:
             except Exception as exc:
                 logger.debug(
                     "hermes_session_title_persist_after_run_failed scope=%s user_id=%s session_key=%s run_id=%s error=%s",
-                    ctx.scope,
+                    RUNTIME_SCOPE,
                     ctx.user.id,
                     session_key,
                     run_id,
@@ -524,7 +525,7 @@ class DedicatedHermesBackend:
                 )
         logger.info(
             "hermes_run_finished scope=%s user_id=%s run_id=%s status=%s first_event_ms=%s first_delta_ms=%s first_visible_delta_ms=%s elapsed_ms=%.1f event_count=%d",
-            ctx.scope,
+            RUNTIME_SCOPE,
             ctx.user.id,
             run_id,
             status_text,
@@ -671,7 +672,7 @@ class DedicatedHermesBackend:
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
 
-        stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
+        stream_ctx = RuntimeContext(user=user)
         base_url = await self._resolve_base_url(stream_ctx)
         target_url = f"{base_url}/api/hermes/events/stream"
         headers = {}
@@ -727,7 +728,7 @@ class DedicatedHermesBackend:
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
 
-        stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
+        stream_ctx = RuntimeContext(user=user)
         target_url = f"{await self._resolve_base_url(stream_ctx)}/v1/runs/{run_id}/events"
         headers = {}
         if settings.dedicated_hermes_api_key:

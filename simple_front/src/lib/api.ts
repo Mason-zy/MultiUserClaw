@@ -297,6 +297,20 @@ export interface KnowledgeGraphResult {
   edges: Array<{ source: string; target: string }>
 }
 
+export interface ModelChoice {
+  id: string
+  name: string
+  provider: string
+  providerName?: string
+}
+
+export interface ModelsResult {
+  models: ModelChoice[]
+  configuredModel: string
+  configuredProviders: Record<string, unknown>
+  runtime?: string
+}
+
 // ---------------------------------------------------------------------------
 // Token management
 // ---------------------------------------------------------------------------
@@ -744,16 +758,21 @@ export async function generateSessionTitle(
 export async function sendChatMessage(
   sessionKey: string,
   message: string,
+  model?: string,
 ): Promise<{ ok: boolean; runId: string | null; title?: string | null }> {
   const result = await fetchJSON<{ ok: boolean; runId: string | null; title?: string | null }>(
     `/api/openclaw/sessions/${encodeURIComponent(sessionKey)}/messages`,
     {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, model }),
     },
   )
   invalidateSessionsCache()
   return result
+}
+
+export async function listModels(): Promise<ModelsResult> {
+  return fetchJSON<ModelsResult>('/api/openclaw/models')
 }
 
 export async function listSlashCommands(agentId?: string): Promise<SlashCommandsResult> {

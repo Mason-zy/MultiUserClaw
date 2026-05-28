@@ -89,6 +89,14 @@ async def _ensure_admin_user() -> None:
         logger.info("Created admin user '%s'", settings.admin_username)
 
 
+async def _ensure_model_config() -> None:
+    from app.db.engine import async_session
+    from app.model_config import seed_model_config_from_env
+
+    async with async_session() as db:
+        await seed_model_config_from_env(db)
+
+
 async def _migrate_add_missing_columns() -> None:
     """Detect columns defined in ORM models but missing from the DB, and ADD them.
 
@@ -148,6 +156,7 @@ async def lifespan(app: FastAPI):
     # Add any columns that exist in models but not yet in the DB
     await _migrate_add_missing_columns()
     await _ensure_admin_user()
+    await _ensure_model_config()
     yield
     await close_runtime_backends()
     await engine.dispose()

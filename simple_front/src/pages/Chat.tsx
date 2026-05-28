@@ -42,8 +42,9 @@ import {
   uploadFileToWorkspace,
   generateSessionTitle,
   listSlashCommands,
+  listModels,
 } from '../lib/api.ts'
-import type { Session, SessionDetail, AgentInfo } from '../lib/api.ts'
+import type { Session, SessionDetail, AgentInfo, ModelChoice } from '../lib/api.ts'
 import {
   CATEGORY_LABELS,
   CATEGORY_STYLES,
@@ -648,6 +649,8 @@ export default function Chat() {
   const [agentSearch, setAgentSearch] = useState('')
   const [agentPickerStyle, setAgentPickerStyle] = useState<CSSProperties>({})
   const [agentPickerListMaxHeight, setAgentPickerListMaxHeight] = useState(288)
+  const [modelChoices, setModelChoices] = useState<ModelChoice[]>([])
+  const [selectedModel, setSelectedModel] = useState('')
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -658,6 +661,26 @@ export default function Chat() {
   const agentPickerButtonRef = useRef<HTMLButtonElement>(null)
   const sessionLoadSeqRef = useRef(0)
   const toast = useToast()
+
+  useEffect(() => {
+    listModels()
+      .then(result => {
+        setModelChoices(result.models || [])
+        const stored = window.localStorage.getItem('openclaw:selected-model') || ''
+        const configured = result.configuredModel || result.models?.[0]?.id || ''
+        const next = result.models?.some(model => model.id === stored) ? stored : configured
+        setSelectedModel(next)
+      })
+      .catch(() => {
+        setModelChoices([])
+      })
+  }, [])
+
+  useEffect(() => {
+    if (selectedModel) {
+      window.localStorage.setItem('openclaw:selected-model', selectedModel)
+    }
+  }, [selectedModel])
 
   const resolveKnownSessionKey = useCallback((rawKey: string): string => {
     const normalized = normalizeSessionKey(rawKey)
@@ -1241,6 +1264,10 @@ export default function Chat() {
   const handleSend = async () => {
     const text = input.trim()
     if ((!text && pendingFiles.length === 0) || (!activeSessionKeyRef.current && !isDraftSession) || chatLoading) return
+    if (!selectedModel) {
+      toast.error('暂无可用模型，请联系管理员配置模型 Key')
+      return
+    }
 
     const requestedAgentId = draftAgentId || searchParams.get('agent') || 'main'
     const sendingSessionKey = activeSessionKeyRef.current || 'agent:' + (requestedAgentId || 'main') + ':session-' + Date.now()
@@ -1332,7 +1359,7 @@ export default function Chat() {
           })
           .catch(() => {})
         : Promise.resolve()
-      const sendResult = await sendChatMessage(sendingSessionKey, finalMessage)
+      const sendResult = await sendChatMessage(sendingSessionKey, finalMessage, selectedModel)
       if (sendResult.title) {
         const now = new Date().toISOString()
         addOptimisticSession({
@@ -1683,6 +1710,27 @@ export default function Chat() {
     </div>
   )
 
+  const renderModelSelector = () => (
+    <label className="flex items-center gap-1.5 rounded-xl border border-light-border bg-light-card px-2 py-1 text-xs text-light-text-secondary">
+      <Brain size={14} />
+      <select
+        value={selectedModel}
+        onChange={event => setSelectedModel(event.target.value)}
+        disabled={modelChoices.length === 0 || isCurrentSending}
+        className="max-w-[220px] bg-transparent text-light-text outline-none disabled:text-light-text-secondary"
+        title="选择模型"
+      >
+        {modelChoices.length === 0 ? (
+          <option value="">暂无可用模型</option>
+        ) : modelChoices.map(model => (
+          <option key={model.id} value={model.id}>
+            {(model.providerName || model.provider) + ' / ' + (model.name || model.id)}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+
   const renderActivityIcon = (activity: AgentActivityEvent) => {
     const iconClass = activity.status === 'failed'
       ? 'text-accent-red'
@@ -1987,6 +2035,7 @@ export default function Chat() {
               <Plus size={18} />
             </IconButton>
             {renderAgentSelector(true)}
+            {renderModelSelector()}
           </div>
           {isCurrentSending ? (
             <IconButton

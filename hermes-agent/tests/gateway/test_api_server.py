@@ -382,6 +382,7 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/responses", adapter._handle_responses)
+    app.router.add_post("/v1/runs", adapter._handle_runs)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
     return app
@@ -430,6 +431,23 @@ class TestAgentExecution:
             conversation_history=[],
             task_id="session-123",
         )
+
+    @pytest.mark.asyncio
+    async def test_run_agent_passes_model_override_to_create_agent(self, adapter):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "ok"}
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent) as mock_create:
+            await adapter._run_agent(
+                user_message="hello",
+                conversation_history=[],
+                model_override="minimax/MiniMax-M2.7",
+            )
+
+        assert mock_create.call_args.kwargs["model_override"] == "minimax/MiniMax-M2.7"
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +524,7 @@ class TestHealthDetailedEndpoint:
         with patch("gateway.status.read_runtime_status", return_value=None):
             async with TestClient(TestServer(app)) as cli:
                 resp = await cli.get("/health/detailed")
-                assert resp.status == 200
+                assert resp.status == 202
                 data = await resp.json()
                 assert data["status"] == "ok"
                 assert data["gateway_state"] is None
@@ -3188,6 +3206,43 @@ class TestSessionKeyHeader:
             assert resp.status == 200
             # _create_agent must be called with gateway_session_key threaded through
             assert captured_kwargs.get("gateway_session_key") == "agent:main:webui:dm:user-7"
+
+    @pytest.mark.asyncio
+    async def test_runs_endpoint_threads_model_into_create_agent(self, auth_adapter):
+        """Runs API must honor the requested model instead of config.yaml's default."""
+        captured_kwargs = {}
+
+        def _fake_create_agent(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok", "messages": []}
+            mock_agent.session_prompt_tokens = 0
+            mock_agent.session_completion_tokens = 0
+            mock_agent.session_total_tokens = 0
+            return mock_agent
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_create_agent", side_effect=_fake_create_agent):
+                resp = await cli.post(
+                    "/v1/runs",
+                    headers={"Authorization": "Bearer sk-secret"},
+                    json={
+                        "model": "minimax/MiniMax-M2.7",
+                        "input": "hi",
+                        "session_id": "agent:main:test-session",
+                    },
+                )
+                assert resp.status == 202
+                payload = await resp.json()
+                run_id = payload.get("run_id")
+                assert run_id
+                for _ in range(40):
+                    if captured_kwargs:
+                        break
+                    await asyncio.sleep(0.05)
+
+        assert captured_kwargs.get("model_override") == "minimax/MiniMax-M2.7"
 
     @pytest.mark.asyncio
     async def test_responses_endpoint_accepts_session_key(self, auth_adapter):

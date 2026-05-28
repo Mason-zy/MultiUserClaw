@@ -3,8 +3,14 @@ FROM python:3.13-slim-bookworm
 WORKDIR /app
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG APT_DEBIAN_MIRROR=http://mirrors.ustc.edu.cn/debian
+ARG APT_SECURITY_MIRROR=http://mirrors.ustc.edu.cn/debian-security
 
-RUN apt-get update \
+RUN sed -i \
+        -e "s|http://deb.debian.org/debian|${APT_DEBIAN_MIRROR}|g" \
+        -e "s|http://deb.debian.org/debian-security|${APT_SECURITY_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 

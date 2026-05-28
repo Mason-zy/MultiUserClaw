@@ -56,6 +56,8 @@ RESET = "\033[0m"
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 AUTO_START_DOCKER_ENV = "NANOBOT_AUTO_START_DOCKER_DESKTOP"
+DEFAULT_APT_DEBIAN_MIRROR = "http://mirrors.ustc.edu.cn/debian"
+DEFAULT_APT_SECURITY_MIRROR = "http://mirrors.ustc.edu.cn/debian-security"
 
 
 def env_flag(name: str) -> bool:
@@ -229,7 +231,12 @@ def sync_deploy_copy_to_hermes():
 
 
 def _hermes_build_arg_flags(with_browser: bool) -> list[str]:
-    flags: list[str] = []
+    apt_debian_mirror = os.environ.get("APT_DEBIAN_MIRROR", DEFAULT_APT_DEBIAN_MIRROR).strip()
+    apt_security_mirror = os.environ.get("APT_SECURITY_MIRROR", DEFAULT_APT_SECURITY_MIRROR).strip()
+    flags: list[str] = [
+        f"--build-arg APT_DEBIAN_MIRROR={shlex.quote(apt_debian_mirror)}",
+        f"--build-arg APT_SECURITY_MIRROR={shlex.quote(apt_security_mirror)}",
+    ]
     if with_browser:
         flags.append("--build-arg HERMES_INSTALL_BROWSER=true")
         download_host = os.environ.get("PLAYWRIGHT_DOWNLOAD_HOST", "").strip()
@@ -292,6 +299,8 @@ def build_and_start(compose_file: str, host: str, gateway_port: int, frontend_po
     api_url = f"http://{host}:{gateway_port}"
     log(f"Frontend VITE_API_URL = {api_url}")
     os.environ["VITE_API_URL"] = api_url
+    os.environ.setdefault("APT_DEBIAN_MIRROR", DEFAULT_APT_DEBIAN_MIRROR)
+    os.environ.setdefault("APT_SECURITY_MIRROR", DEFAULT_APT_SECURITY_MIRROR)
 
     compose_args = f"-f {compose_file}"
 
@@ -503,6 +512,8 @@ def main():
             api_url = resolve_vite_api_url(args.host, args.gateway_port, args.relative_api)
             os.environ["VITE_API_URL"] = api_url
             log("VITE_API_URL = <relative path>" if args.relative_api else f"VITE_API_URL = {api_url}")
+            os.environ.setdefault("APT_DEBIAN_MIRROR", DEFAULT_APT_DEBIAN_MIRROR)
+            os.environ.setdefault("APT_SECURITY_MIRROR", DEFAULT_APT_SECURITY_MIRROR)
 
         # 重建 compose 服务
         if services:
@@ -526,6 +537,8 @@ def main():
     # 设置 VITE_API_URL（frontend 构建需要）
     api_url = resolve_vite_api_url(args.host, args.gateway_port, args.relative_api)
     os.environ["VITE_API_URL"] = api_url
+    os.environ.setdefault("APT_DEBIAN_MIRROR", DEFAULT_APT_DEBIAN_MIRROR)
+    os.environ.setdefault("APT_SECURITY_MIRROR", DEFAULT_APT_SECURITY_MIRROR)
     log("VITE_API_URL = <relative path>" if args.relative_api else f"VITE_API_URL = {api_url}")
 
     compose_args = f"-f {args.compose}"
