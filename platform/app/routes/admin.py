@@ -32,6 +32,8 @@ class UserSummary(BaseModel):
     container_status: str | None = None
     container_docker_id: str | None = None
     container_created_at: str | None = None
+    shared_agent_id: str | None = None
+    shared_agent_status: str | None = None
     tokens_used_today: int = 0
 
 
@@ -135,6 +137,7 @@ async def list_users(
             User.email,
             User.role,
             User.quota_tier,
+            User.runtime_mode,
             User.is_active,
             User.created_at.label("user_created_at"),
             Container.status.label("container_status"),
@@ -171,12 +174,14 @@ async def list_users(
             email=row.email,
             role=row.role,
             quota_tier=row.quota_tier,
-            runtime_mode="dedicated",
+            runtime_mode=row.runtime_mode,
             is_active=row.is_active,
             created_at=row.user_created_at.isoformat() if row.user_created_at else None,
             container_status=row.container_status,
             container_docker_id=row.container_docker_id,
             container_created_at=row.container_created_at.isoformat() if row.container_created_at else None,
+            shared_agent_id=row.shared_agent_id,
+            shared_agent_status=row.shared_agent_status,
             tokens_used_today=row.tokens_used_today,
         )
         for row in rows
@@ -202,6 +207,9 @@ async def create_user_handler(
         raise HTTPException(status_code=400, detail="role must be user or admin")
     if req.quota_tier not in {"free", "basic", "pro"}:
         raise HTTPException(status_code=400, detail="quota_tier must be free, basic, or pro")
+    if req.runtime_mode not in {"dedicated", "shared"}:
+        raise HTTPException(status_code=400, detail="runtime_mode must be dedicated or shared")
+
     # Check uniqueness
     if await get_user_by_username(db, req.username.strip()):
         raise HTTPException(status_code=409, detail="Username already exists")
@@ -214,6 +222,7 @@ async def create_user_handler(
         password_hash=hash_password(req.password),
         role=req.role,
         quota_tier=req.quota_tier,
+        runtime_mode=req.runtime_mode,
     )
     db.add(user)
     await write_audit_log(

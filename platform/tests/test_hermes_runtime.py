@@ -1,13 +1,16 @@
 import io
+import json
 import logging
 import sys
 import tarfile
 import types
+import zipfile
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import HTTPException
+from starlette.websockets import WebSocketDisconnect
 
 if "docker" not in sys.modules:
     docker_stub = types.ModuleType("docker")
@@ -114,6 +117,33 @@ def shared_user():
         runtime_mode="shared",
         is_active=True,
     )
+
+
+def _tar_file_bytes(name: str, contents: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        info = tarfile.TarInfo(name=name)
+        info.size = len(contents)
+        archive.addfile(info, io.BytesIO(contents))
+    buffer.seek(0)
+    return buffer.read()
+
+
+def test_read_hermes_data_file_falls_back_to_workspace_root(monkeypatch):
+    from app.runtime_backends import hermes_files
+
+    class FakeContainer:
+        def get_archive(self, path):
+            if path == "/opt/data/agents/main/sessions/sessions.json":
+                raise hermes_files.DockerNotFound("missing")
+            assert path == "/workspace/agents/main/sessions/sessions.json"
+            return [_tar_file_bytes("sessions.json", b'{"ok":true}')], {}
+
+    monkeypatch.setattr("app.runtime_backends.hermes_files.get_docker_container", lambda container_id: FakeContainer())
+
+    data = hermes_files.read_data_file_from_hermes_container("container-1", "agents/main/sessions/sessions.json")
+
+    assert data == b'{"ok":true}'
 
 
 @pytest.mark.asyncio
@@ -282,13 +312,40 @@ async def test_dedicated_hermes_get_agent_info_uses_models_endpoint(monkeypatch,
 
     payload = await backend.get_agent_info(RuntimeContext(user=dedicated_user, scope="dedicated"))
 
-    assert payload == {
-        "agents": [{"id": "hermes-agent", "object": "model"}],
-        "defaultId": "hermes-agent",
-        "mainKey": "agent:hermes-agent",
-        "scope": "dedicated",
-        "runtime_mode": "dedicated",
-    }
+    assert payload["defaultId"] == "main"
+    assert payload["mainKey"] == "agent:main"
+    assert payload["scope"] == "dedicated"
+    assert payload["runtime_mode"] == "dedicated"
+    assert [item["id"] for item in payload["agents"]][:2] == ["main", "manager"]
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hermes_get_agent_info_uses_packaged_agents(monkeypatch, dedicated_user):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    async def fake_get_models(self):
+        return {
+            "data": [
+                {"id": "hermes-agent", "object": "model"},
+                {"id": "main", "object": "model"},
+                {"id": "innovation", "object": "model"},
+            ]
+        }
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.get_models", fake_get_models)
+
+    payload = await backend.get_agent_info(RuntimeContext(user=dedicated_user, scope="dedicated"))
+
+    agent_ids = [item["id"] for item in payload["agents"]]
+    assert payload["defaultId"] == "main"
+    assert payload["mainKey"] == "agent:main"
+    assert agent_ids[:6] == ["main", "manager", "programmer", "researcher", "hr", "doctor"]
+    assert "innovation" in agent_ids
+    assert "hermes-agent" not in agent_ids
+    innovation = next(item for item in payload["agents"] if item["id"] == "innovation")
+    assert innovation["available"] is True
 
 
 @pytest.mark.asyncio
@@ -475,15 +532,22 @@ async def test_dedicated_hermes_send_message_starts_run_with_session_id(monkeypa
 
     backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
 
-    async def fake_create_run(self, *, message, session_id):
+    async def fake_create_run(self, *, message, session_id, session_key=None, model="hermes-agent", conversation_history=None):
         captured["message"] = message
         captured["session_id"] = session_id
+        captured["session_key"] = session_key
+        captured["model"] = model
+        captured["conversation_history"] = conversation_history
         return {
             "run_id": "run-123",
             "session_id": session_id,
             "status": "started",
         }
 
+    async def fake_session_record(ctx, session_key):
+        return {"session_id": session_key, "messages": []}
+
+    monkeypatch.setattr(backend, "_session_record", fake_session_record)
     monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.create_run", fake_create_run)
 
     payload = await backend.send_message(
@@ -492,12 +556,93 @@ async def test_dedicated_hermes_send_message_starts_run_with_session_id(monkeypa
         message="Hi",
     )
 
-    assert captured == {"message": "Hi", "session_id": "sess-123"}
+    assert captured == {
+        "message": "Hi",
+        "session_id": "sess-123",
+        "session_key": "sess-123",
+        "model": "hermes-agent",
+        "conversation_history": [],
+    }
     assert payload["run_id"] == "run-123"
     assert payload["runId"] == "run-123"
     assert payload["session_key"] == "sess-123"
     assert payload["sessionKey"] == "sess-123"
     assert payload["raw"]["run_id"] == "run-123"
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hermes_send_message_uses_agent_profile_model(monkeypatch, dedicated_user):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    captured = {}
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    async def fake_create_run(self, *, message, session_id, session_key=None, model="hermes-agent", conversation_history=None):
+        captured["message"] = message
+        captured["session_id"] = session_id
+        captured["session_key"] = session_key
+        captured["model"] = model
+        captured["conversation_history"] = conversation_history
+        return {"run_id": "run-innovation", "session_id": session_id}
+
+    async def fake_session_record(ctx, session_key):
+        return {"session_id": session_key, "messages": []}
+
+    monkeypatch.setattr(backend, "_session_record", fake_session_record)
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.create_run", fake_create_run)
+
+    await backend.send_message(
+        RuntimeContext(user=dedicated_user, scope="dedicated"),
+        session_key="agent:innovation:session-123",
+        message="挖掘空白点",
+    )
+
+    assert captured == {
+        "message": "挖掘空白点",
+        "session_id": "agent:innovation:session-123",
+        "session_key": "agent:innovation:session-123",
+        "model": "innovation",
+        "conversation_history": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hermes_send_message_passes_existing_session_history(monkeypatch, dedicated_user):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    captured = {}
+
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    async def fake_session_record(ctx, session_key):
+        assert session_key == "sess-123"
+        return {
+            "session_id": "sess-123",
+            "messages": [
+                {"role": "user", "content": "肺栓塞的临床表现有哪些"},
+                {"role": "assistant", "content": "直接裸答"},
+                {"role": "tool", "content": "large tool result should not be replayed"},
+                {"role": "assistant", "content": ""},
+            ],
+        }
+
+    async def fake_create_run(self, *, message, session_id, session_key=None, model="hermes-agent", conversation_history=None):
+        captured["conversation_history"] = conversation_history
+        return {"run_id": "run-123", "session_id": session_id}
+
+    monkeypatch.setattr(backend, "_session_record", fake_session_record)
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.create_run", fake_create_run)
+
+    await backend.send_message(
+        RuntimeContext(user=dedicated_user, scope="dedicated"),
+        session_key="sess-123",
+        message="你怎么不用PICO或者论文检索",
+    )
+
+    assert captured["conversation_history"] == [
+        {"role": "user", "content": "肺栓塞的临床表现有哪些"},
+        {"role": "assistant", "content": "直接裸答"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -511,15 +656,23 @@ async def test_dedicated_hermes_send_message_logs_run_start_latency(
     times = iter([10.0, 10.125])
     monkeypatch.setattr("app.runtime_backends.dedicated_hermes.time.perf_counter", lambda: next(times))
 
-    async def fake_create_run(self, *, message, session_id):
+    async def fake_create_run(self, *, message, session_id, session_key=None, model="hermes-agent", conversation_history=None):
         assert message == "Hi"
         assert session_id == "sess-123"
+        assert session_key == "sess-123"
+        assert model == "hermes-agent"
+        assert conversation_history == []
         return {"run_id": "run-123", "session_id": session_id, "status": "started"}
 
     monkeypatch.setattr("app.runtime_backends.dedicated_hermes.HermesClient.create_run", fake_create_run)
 
     caplog.set_level(logging.INFO, logger="app.runtime_backends.dedicated_hermes")
     backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    async def fake_session_record(ctx, session_key):
+        return {"session_id": session_key, "messages": []}
+
+    monkeypatch.setattr(backend, "_session_record", fake_session_record)
 
     await backend.send_message(
         RuntimeContext(user=dedicated_user, scope="dedicated"),
@@ -1191,6 +1344,48 @@ async def test_dedicated_hermes_list_sessions_maps_api_payload(monkeypatch, dedi
 
 
 @pytest.mark.asyncio
+async def test_dedicated_hermes_list_sessions_includes_legacy_openclaw_sessions(monkeypatch, dedicated_user):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    async def fake_request(self, ctx, method, path, **kwargs):
+        assert path == "/api/hermes/sessions"
+        return {"sessions": []}
+
+    async def fake_read_legacy_data_file(ctx, path):
+        assert path == "agents/main/sessions/sessions.json"
+        return json.dumps(
+            {
+                "agent:main:session-1778564877296": {
+                    "sessionId": "8fbcc394-0d8c-4058-8bd1-70c4003333c8",
+                    "updatedAt": 1778564916392,
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.DedicatedHermesBackend._request", fake_request)
+    monkeypatch.setattr(backend, "_read_legacy_data_file", fake_read_legacy_data_file)
+
+    payload = await backend.list_sessions(RuntimeContext(user=dedicated_user, scope="dedicated"))
+
+    assert payload == [
+        {
+            "key": "agent:main:session-1778564877296",
+            "sessionKey": "agent:main:session-1778564877296",
+            "title": "agent:main:session-1778564877296",
+            "created_at": None,
+            "createdAt": None,
+            "updated_at": "2026-05-12T05:48:36.392Z",
+            "updatedAt": "2026-05-12T05:48:36.392Z",
+            "messageCount": None,
+            "runtime": "legacy-openclaw",
+            "readonly": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_shared_hermes_list_sessions_filters_by_session_prefix(monkeypatch, shared_user):
     from app.runtime_backends.shared_hermes import SharedHermesBackend
 
@@ -1275,6 +1470,105 @@ async def test_dedicated_hermes_get_session_maps_messages(monkeypatch, dedicated
     assert payload["title"] == "Second"
     assert payload["messageCount"] == 2
     assert payload["messages"][1]["content"] == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hermes_get_session_falls_back_to_legacy_openclaw_jsonl(monkeypatch, dedicated_user):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    async def fake_request(self, ctx, method, path, **kwargs):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    async def fake_read_legacy_data_file(ctx, path):
+        if path == "agents/main/sessions/sessions.json":
+            return json.dumps(
+                {
+                    "agent:main:session-1778564877296": {
+                        "sessionId": "8fbcc394-0d8c-4058-8bd1-70c4003333c8",
+                        "updatedAt": 1778564916392,
+                    }
+                }
+            )
+        if path == "agents/main/sessions/8fbcc394-0d8c-4058-8bd1-70c4003333c8.jsonl":
+            return "\n".join(
+                [
+                    json.dumps({"type": "session", "timestamp": "2026-05-12T05:48:27.885Z"}),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "timestamp": "2026-05-12T05:48:27.944Z",
+                            "message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Sender (untrusted metadata):\n```json\n{}\n```\n\n[Tue 2026-05-12 13:48 GMT+8] 你好",
+                                    }
+                                ],
+                                "timestamp": 1778564907934,
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "timestamp": "2026-05-12T05:48:36.321Z",
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "thinking", "thinking": "hidden"},
+                                    {"type": "text", "text": "你好，有什么医学学术问题需要我帮忙吗？"},
+                                ],
+                            },
+                        }
+                    ),
+                ]
+            )
+        pytest.fail(f"unexpected legacy path: {path}")
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.DedicatedHermesBackend._request", fake_request)
+    monkeypatch.setattr(backend, "_read_legacy_data_file", fake_read_legacy_data_file)
+
+    payload = await backend.get_session(RuntimeContext(user=dedicated_user, scope="dedicated"), "agent:main:session-1778564877296")
+
+    assert payload["key"] == "agent:main:session-1778564877296"
+    assert payload["runtime"] == "legacy-openclaw"
+    assert payload["readonly"] is True
+    assert payload["messageCount"] == 2
+    assert payload["messages"] == [
+        {"role": "user", "content": "你好", "timestamp": "2026-05-12T05:48:27.934Z"},
+        {"role": "assistant", "content": "你好，有什么医学学术问题需要我帮忙吗？", "timestamp": "2026-05-12T05:48:36.321Z"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dedicated_hermes_get_session_returns_empty_openclaw_session(monkeypatch, dedicated_user):
+    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
+
+    backend = DedicatedHermesBackend(base_url="http://dedicated-hermes")
+
+    async def fake_request(self, ctx, method, path, **kwargs):
+        assert method == "GET"
+        assert path == "/api/hermes/sessions/agent:main:session-1779333210355"
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    async def fake_legacy_session(ctx, session_key):
+        assert session_key == "agent:main:session-1779333210355"
+        return None
+
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.DedicatedHermesBackend._request", fake_request)
+    monkeypatch.setattr(backend, "_legacy_openclaw_session", fake_legacy_session)
+
+    payload = await backend.get_session(RuntimeContext(user=dedicated_user, scope="dedicated"), "agent:main:session-1779333210355")
+
+    assert payload["key"] == "agent:main:session-1779333210355"
+    assert payload["sessionKey"] == "agent:main:session-1779333210355"
+    assert payload["messages"] == []
+    assert payload["messageCount"] == 0
+    assert payload["runtime"] == "hermes"
+    assert payload["pending"] is True
 
 
 @pytest.mark.asyncio
@@ -1414,6 +1708,195 @@ async def test_dedicated_hermes_upload_file_puts_archive_into_container(monkeypa
         assert tar.extractfile(uploaded_name).read() == b"hello hermes"
 
 
+def test_browse_hermes_filemanager_reads_workspace_directory(monkeypatch):
+    from app.runtime_backends.hermes_files import browse_hermes_filemanager
+
+    class FakeDockerContainer:
+        def __init__(self):
+            self.exec_calls = []
+
+        def exec_run(self, cmd):
+            self.exec_calls.append(cmd)
+            assert cmd[:3] == ["python3", "-c", cmd[2]]
+            assert cmd[-1] == "workspace/t"
+            return SimpleNamespace(
+                exit_code=0,
+                output=json.dumps(
+                    {
+                        "type": "directory",
+                        "path": "t",
+                        "root": "/opt/data/workspace",
+                        "items": [
+                            {
+                                "name": "a.txt",
+                                "path": "t/a.txt",
+                                "type": "file",
+                                "size": 5,
+                                "content_type": "text/plain",
+                                "modified": "2026-05-21T03:00:00Z",
+                            }
+                        ],
+                        "runtime": "hermes",
+                    }
+                ).encode("utf-8"),
+            )
+
+    class FakeDockerClient:
+        def __init__(self, container):
+            self.container = container
+            self.containers = self
+
+        def get(self, container_id):
+            assert container_id == "docker-123"
+            return self.container
+
+    fake_container = FakeDockerContainer()
+    monkeypatch.setattr("app.container.manager._docker", lambda: FakeDockerClient(fake_container))
+
+    payload = browse_hermes_filemanager("docker-123", "t")
+
+    assert payload["path"] == "t"
+    assert payload["items"][0]["path"] == "t/a.txt"
+    assert fake_container.exec_calls
+
+
+@pytest.mark.asyncio
+async def test_filemanager_upload_normalizes_relative_directory(monkeypatch, dedicated_user):
+    from app.api_compat import openclaw_compat
+    from fastapi import UploadFile
+
+    captured = {}
+
+    class FakeBackend:
+        async def upload_file(self, ctx, file, target_dir=None):
+            captured["ctx"] = ctx
+            captured["filename"] = file.filename
+            captured["target_dir"] = target_dir
+            return {"path": f"{target_dir}/smoke.txt"}
+
+    monkeypatch.setattr(openclaw_compat, "get_runtime_backend", lambda user: FakeBackend())
+
+    upload = UploadFile(filename="smoke.txt", file=io.BytesIO(b"hello"))
+    payload = await openclaw_compat.upload_dedicated_file(
+        file=upload,
+        path="t",
+        upload_dir=None,
+        user=dedicated_user,
+    )
+
+    assert captured["ctx"].user is dedicated_user
+    assert captured["filename"] == "smoke.txt"
+    assert captured["target_dir"] == "workspace/t"
+    assert payload["path"] == "workspace/t/smoke.txt"
+
+
+@pytest.mark.asyncio
+async def test_hermes_skill_upload_extracts_zip_into_skills_root(monkeypatch):
+    from app.runtime_backends.hermes_skills import upload_skill_zip_to_hermes_container
+    from fastapi import UploadFile
+
+    class FakeDockerContainer:
+        def __init__(self):
+            self.calls = []
+            self.exec_calls = []
+
+        def put_archive(self, path, data):
+            self.calls.append((path, data))
+            return True
+
+        def exec_run(self, cmd):
+            self.exec_calls.append(cmd)
+            return SimpleNamespace(exit_code=0, output=b"")
+
+    class FakeDockerClient:
+        def __init__(self, container):
+            self.container = container
+            self.requested_ids = []
+            self.containers = self
+
+        def get(self, container_id):
+            self.requested_ids.append(container_id)
+            return self.container
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n# Demo\n")
+        zf.writestr("demo-skill/references/readme.md", "reference")
+    zip_buffer.seek(0)
+
+    fake_docker_container = FakeDockerContainer()
+    fake_docker_client = FakeDockerClient(fake_docker_container)
+    monkeypatch.setattr("app.container.manager._docker", lambda: fake_docker_client)
+
+    upload = UploadFile(filename="demo-skill.zip", file=zip_buffer)
+    payload = await upload_skill_zip_to_hermes_container("docker-123", upload)
+
+    assert payload == {"name": "demo-skill", "description": "Demo skill", "source": "hermes", "disabled": False}
+    assert fake_docker_client.requested_ids == ["docker-123"]
+    assert fake_docker_container.exec_calls
+    assert fake_docker_container.calls[0][0] == "/opt/data/skills"
+    with tarfile.open(fileobj=io.BytesIO(fake_docker_container.calls[0][1]), mode="r") as tar:
+        members = {member.name: member for member in tar.getmembers()}
+        assert "demo-skill/SKILL.md" in members
+        assert "demo-skill/references/readme.md" in members
+        assert tar.extractfile("demo-skill/SKILL.md").read().startswith(b"---\nname: demo-skill")
+
+
+@pytest.mark.asyncio
+async def test_hermes_skill_upload_installs_multiple_skills_from_archive(monkeypatch):
+    from app.runtime_backends.hermes_skills import upload_skill_zip_to_hermes_container
+    from fastapi import UploadFile
+
+    class FakeDockerContainer:
+        def __init__(self):
+            self.calls = []
+            self.exec_calls = []
+
+        def put_archive(self, path, data):
+            self.calls.append((path, data))
+            return True
+
+        def exec_run(self, cmd):
+            self.exec_calls.append(cmd)
+            return SimpleNamespace(exit_code=0, output=b"")
+
+    class FakeDockerClient:
+        def __init__(self, container):
+            self.container = container
+            self.containers = self
+
+        def get(self, container_id):
+            return self.container
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr(
+            "superpowers-main/skills/brainstorming/SKILL.md",
+            "---\nname: brainstorming\ndescription: Brainstorming\n---\n# Brainstorming\n",
+        )
+        zf.writestr(
+            "superpowers-main/skills/systematic-debugging/SKILL.md",
+            "---\nname: systematic-debugging\ndescription: Debugging\n---\n# Debugging\n",
+        )
+        zf.writestr("superpowers-main/skills/systematic-debugging/references/root-cause.md", "trace")
+    zip_buffer.seek(0)
+
+    fake_docker_container = FakeDockerContainer()
+    monkeypatch.setattr("app.container.manager._docker", lambda: FakeDockerClient(fake_docker_container))
+
+    upload = UploadFile(filename="superpowers-main.zip", file=zip_buffer)
+    payload = await upload_skill_zip_to_hermes_container("docker-123", upload)
+
+    assert payload["name"] == "brainstorming"
+    assert [item["name"] for item in payload["installed"]] == ["brainstorming", "systematic-debugging"]
+    with tarfile.open(fileobj=io.BytesIO(fake_docker_container.calls[0][1]), mode="r") as tar:
+        members = {member.name: member for member in tar.getmembers()}
+        assert "superpowers-main/brainstorming/SKILL.md" in members
+        assert "superpowers-main/systematic-debugging/SKILL.md" in members
+        assert "superpowers-main/systematic-debugging/references/root-cause.md" in members
+        assert "superpowers-main/brainstorming/systematic-debugging/SKILL.md" not in members
+
+
 @pytest.mark.asyncio
 async def test_shared_hermes_upload_file_puts_archive_into_shared_container(monkeypatch, shared_user):
     from app.runtime_backends.shared_hermes import SharedHermesBackend
@@ -1516,6 +1999,8 @@ async def test_dedicated_hermes_stream_maps_upstream_events(monkeypatch, dedicat
             yield 'data: {"type":"message.delta","session_id":"sess-9","delta":"Hi"}\n\n'
             yield 'data: {"type":"message.completed","session_id":"sess-9","message":{"role":"assistant","content":"Hello"}}\n\n'
 
+    captured = []
+
     class FakeAsyncClientForStream:
         async def __aenter__(self):
             return self
@@ -1524,10 +2009,10 @@ async def test_dedicated_hermes_stream_maps_upstream_events(monkeypatch, dedicat
             return None
 
         def stream(self, method, url, **kwargs):
-            assert method == "GET"
-            assert url == "http://dedicated-hermes/api/hermes/events/stream"
+            captured.append((method, url, kwargs))
             return FakeStreamResponse()
 
+    monkeypatch.setattr("app.runtime_backends.dedicated_hermes.settings.dedicated_hermes_api_key", "bridge-key")
     monkeypatch.setattr("app.runtime_backends.dedicated_hermes.decode_token", lambda token: {"type": "access", "sub": dedicated_user.id})
 
     async def fake_get_user(db, user_id):
@@ -1554,6 +2039,11 @@ async def test_dedicated_hermes_stream_maps_upstream_events(monkeypatch, dedicat
         body += chunk
 
     text = body.decode("utf-8")
+    assert captured[0] == (
+        "GET",
+        "http://dedicated-hermes/api/hermes/events/stream",
+        {"headers": {"Authorization": "Bearer bridge-key"}},
+    )
     assert '"state": "delta"' in text
     assert '"state": "final"' in text
     assert '"sessionKey": "sess-9"' in text
@@ -1871,21 +2361,47 @@ async def test_proxy_file_request_maps_workspace_paths_for_dedicated_hermes(monk
 
 
 @pytest.mark.asyncio
-async def test_proxy_file_request_rejects_unsupported_dedicated_hermes_download(monkeypatch, dedicated_user):
+async def test_proxy_file_request_serves_tmp_paths_for_dedicated_hermes(monkeypatch, dedicated_user):
     from app.routes import proxy
 
     class FakeRequest:
         headers = {}
-        query_params = SimpleNamespace(get=lambda key, default="": "/workspace/uploads/test.txt" if key == "path" else default)
+        query_params = SimpleNamespace(get=lambda key, default="": "/tmp/sepsis_results.json" if key == "path" else default)
 
     def fake_decode(token):
+        assert token == "tok"
         return {"type": "access", "sub": dedicated_user.id}
 
     async def fake_get_user(db, user_id):
+        assert user_id == dedicated_user.id
         return dedicated_user
 
-    async def fake_container_url(db, user):
-        return "http://dedicated-hermes"
+    async def fake_ensure_running(db, user_id):
+        assert user_id == dedicated_user.id
+        return SimpleNamespace(docker_id="docker-123")
+
+    class FakeDockerContainer:
+        def __init__(self):
+            self.paths = []
+
+        def get_archive(self, path):
+            self.paths.append(path)
+            tar_buffer = io.BytesIO()
+            with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+                content = b'{"ok": true}'
+                info = tarfile.TarInfo(name="sepsis_results.json")
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+            tar_buffer.seek(0)
+            return [tar_buffer.read()], {"name": "sepsis_results.json", "size": len(content)}
+
+    class FakeDockerClient:
+        def __init__(self, container):
+            self.container = container
+            self.containers = self
+
+        def get(self, container_id):
+            return self.container
 
     class FakeAsyncSessionContext:
         async def __aenter__(self):
@@ -1894,16 +2410,161 @@ async def test_proxy_file_request_rejects_unsupported_dedicated_hermes_download(
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
+    fake_docker_container = FakeDockerContainer()
+
     monkeypatch.setattr("app.auth.service.decode_token", fake_decode)
     monkeypatch.setattr("app.auth.service.get_user_by_id", fake_get_user)
     monkeypatch.setattr("app.routes.proxy.async_session", lambda: FakeAsyncSessionContext())
-    monkeypatch.setattr("app.routes.proxy._container_url", fake_container_url)
+    monkeypatch.setattr("app.routes.proxy.ensure_running", fake_ensure_running)
+    monkeypatch.setattr("app.container.manager._docker", lambda: FakeDockerClient(fake_docker_container))
     monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
 
-    with pytest.raises(HTTPException, match="supports /workspace paths") as exc:
-        await proxy._proxy_file_request(FakeRequest(), "tok", "filemanager/download")
+    response = await proxy._proxy_file_request(FakeRequest(), "tok", "filemanager/serve")
 
-    assert exc.value.status_code == 404
+    assert response.body == b'{"ok": true}'
+    assert fake_docker_container.paths == ["/tmp/sepsis_results.json"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_file_request_serves_legacy_scripts_path_from_skill(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    class FakeRequest:
+        headers = {}
+        query_params = SimpleNamespace(get=lambda key, default="": "/scripts/medical_search.py" if key == "path" else default)
+
+    def fake_decode(token):
+        assert token == "tok"
+        return {"type": "access", "sub": dedicated_user.id}
+
+    async def fake_get_user(db, user_id):
+        assert user_id == dedicated_user.id
+        return dedicated_user
+
+    async def fake_ensure_running(db, user_id):
+        assert user_id == dedicated_user.id
+        return SimpleNamespace(docker_id="docker-123")
+
+    class FakeDockerContainer:
+        def __init__(self):
+            self.paths = []
+            self.exec_calls = []
+
+        def get_archive(self, path):
+            self.paths.append(path)
+            if path == "/scripts/medical_search.py":
+                raise RuntimeError("not found")
+            tar_buffer = io.BytesIO()
+            with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+                content = b"print('medical search')\n"
+                info = tarfile.TarInfo(name="medical_search.py")
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+            tar_buffer.seek(0)
+            return [tar_buffer.read()], {"name": "medical_search.py", "size": len(content)}
+
+        def exec_run(self, cmd):
+            self.exec_calls.append(cmd)
+            return SimpleNamespace(
+                exit_code=0,
+                output=b"/opt/data/skills/medical-keyword-search/scripts/medical_search.py\n",
+            )
+
+    class FakeDockerClient:
+        def __init__(self, container):
+            self.container = container
+            self.containers = self
+
+        def get(self, container_id):
+            return self.container
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    fake_docker_container = FakeDockerContainer()
+
+    monkeypatch.setattr("app.auth.service.decode_token", fake_decode)
+    monkeypatch.setattr("app.auth.service.get_user_by_id", fake_get_user)
+    monkeypatch.setattr("app.routes.proxy.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr("app.routes.proxy.ensure_running", fake_ensure_running)
+    monkeypatch.setattr("app.container.manager._docker", lambda: FakeDockerClient(fake_docker_container))
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+
+    response = await proxy._proxy_file_request(FakeRequest(), "tok", "filemanager/serve")
+
+    assert response.body == b"print('medical search')\n"
+    assert fake_docker_container.paths == [
+        "/scripts/medical_search.py",
+        "/opt/data/skills/medical-keyword-search/scripts/medical_search.py",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_proxy_file_request_serves_download_paths_for_dedicated_hermes(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    class FakeRequest:
+        headers = {}
+        query_params = SimpleNamespace(get=lambda key, default="": "t/test.txt" if key == "path" else default)
+
+    def fake_decode(token):
+        return {"type": "access", "sub": dedicated_user.id}
+
+    async def fake_get_user(db, user_id):
+        return dedicated_user
+
+    async def fake_ensure_running(db, user_id):
+        assert user_id == dedicated_user.id
+        return SimpleNamespace(docker_id="docker-123")
+
+    class FakeDockerContainer:
+        def __init__(self):
+            self.paths = []
+
+        def get_archive(self, path):
+            self.paths.append(path)
+            tar_buffer = io.BytesIO()
+            with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+                content = b"hello download"
+                info = tarfile.TarInfo(name="test.txt")
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+            tar_buffer.seek(0)
+            return [tar_buffer.read()], {"name": "test.txt", "size": len(content)}
+
+    class FakeDockerClient:
+        def __init__(self, container):
+            self.container = container
+            self.containers = self
+
+        def get(self, container_id):
+            assert container_id == "docker-123"
+            return self.container
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    fake_docker_container = FakeDockerContainer()
+
+    monkeypatch.setattr("app.auth.service.decode_token", fake_decode)
+    monkeypatch.setattr("app.auth.service.get_user_by_id", fake_get_user)
+    monkeypatch.setattr("app.routes.proxy.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr("app.routes.proxy.ensure_running", fake_ensure_running)
+    monkeypatch.setattr("app.container.manager._docker", lambda: FakeDockerClient(fake_docker_container))
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+
+    response = await proxy._proxy_file_request(FakeRequest(), "tok", "filemanager/download")
+
+    assert response.body == b"hello download"
+    assert fake_docker_container.paths == ["/opt/data/workspace/t/test.txt"]
 
 
 @pytest.mark.asyncio
@@ -1931,6 +2592,103 @@ async def test_proxy_http_returns_empty_commands_for_dedicated_hermes(monkeypatc
         b'{"agentId":"agent-main","commands":[],"runtime":"hermes",'
         b'"compatibility":"openclaw-empty"}'
     )
+
+
+@pytest.mark.asyncio
+async def test_proxy_http_returns_settings_config_for_dedicated_hermes(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    class FakeRequest:
+        method = "GET"
+        query_params = {}
+        headers = {}
+
+        async def body(self):
+            return b""
+
+    async def fake_container_url(db, user):
+        pytest.fail("Hermes settings compatibility must not proxy to missing /api/settings/config")
+
+    monkeypatch.setattr("app.routes.proxy._container_url", fake_container_url)
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+
+    response = await proxy.proxy_http("settings/config", FakeRequest(), dedicated_user, object())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["runtime"] == "hermes"
+    assert payload["compatibility"] == "openclaw-readonly"
+    assert payload["config"]["gateway"]["bind"] == "platform"
+    assert isinstance(payload["config"]["gateway"]["port"], int)
+    assert payload["config"]["gateway"]["controlUi"]["allowedOrigins"] == ["*"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_http_rejects_settings_config_write_for_dedicated_hermes(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    class FakeRequest:
+        method = "PUT"
+        query_params = {}
+        headers = {"content-type": "application/json"}
+
+        async def body(self):
+            return b'{"gateway":{"port":18789}}'
+
+    async def fake_container_url(db, user):
+        pytest.fail("Hermes settings write compatibility must not proxy to missing /api/settings/config")
+
+    monkeypatch.setattr("app.routes.proxy._container_url", fake_container_url)
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+
+    response = await proxy.proxy_http("settings/config", FakeRequest(), dedicated_user, object())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["runtime"] == "hermes"
+    assert "environment variables" in payload["detail"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_http_maps_hermes_status_to_openclaw_gateway_shape(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    class FakeRequest:
+        method = "GET"
+        query_params = {}
+        headers = {}
+
+        async def body(self):
+            return b""
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"status": "ok", "platform": "hermes-agent"}
+
+    async def fake_container_url(db, user):
+        return "http://dedicated-hermes"
+
+    async def fake_hermes_request(method, base_url, path, **kwargs):
+        assert (method, base_url, path) == ("GET", "http://dedicated-hermes", "/health")
+        return FakeResponse()
+
+    monkeypatch.setattr("app.routes.proxy._container_url", fake_container_url)
+    monkeypatch.setattr("app.routes.proxy._hermes_request", fake_hermes_request)
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+    monkeypatch.setattr(proxy.settings, "default_model", "dashscope/qwen3-coder-plus")
+
+    response = await proxy.proxy_http("status", FakeRequest(), dedicated_user, object())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["gateway_connected"] is True
+    assert payload["config_path"] == "platform://hermes"
+    assert payload["workspace"] == "/workspace"
+    assert payload["model"] == "dashscope/qwen3-coder-plus"
+    assert payload["runtime"] == "hermes"
 
 
 @pytest.mark.asyncio
@@ -1984,6 +2742,119 @@ async def test_proxy_http_maps_models_to_hermes_v1_models(monkeypatch, dedicated
     assert captured[0][1] == "http://dedicated-hermes/v1/models"
     assert b'"models":[{"id":"hermes-agent","name":"hermes-agent","provider":"hermes"}]' in response.body
     assert b'"configuredModel":"dashscope/qwen3-coder-plus"' in response.body
+
+
+@pytest.mark.asyncio
+async def test_proxy_terminal_websocket_uses_platform_bridge_for_dedicated_hermes(monkeypatch, dedicated_user):
+    from app.routes import proxy
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.accepted = False
+            self.sent = []
+            self.closed = []
+
+        async def accept(self):
+            self.accepted = True
+
+        async def send_text(self, text):
+            self.sent.append(text)
+
+        async def close(self, code=1000, reason=None):
+            self.closed.append((code, reason))
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def fake_get_user(db, user_id):
+        assert user_id == dedicated_user.id
+        return dedicated_user
+
+    class FakeContainer:
+        docker_id = "container-123"
+        internal_host = "hermes-user"
+        internal_port = 18080
+
+    async def fake_ensure_running(db, user_id):
+        assert user_id == dedicated_user.id
+        return FakeContainer()
+
+    called = []
+
+    async def fake_bridge(websocket_arg, container_id):
+        called.append((websocket_arg, container_id))
+
+    websocket = FakeWebSocket()
+    monkeypatch.setattr("app.auth.service.decode_token", lambda token: {"type": "access", "sub": dedicated_user.id})
+    monkeypatch.setattr("app.auth.service.get_user_by_id", fake_get_user)
+    monkeypatch.setattr("app.routes.proxy.async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr("app.routes.proxy.ensure_running", fake_ensure_running)
+    monkeypatch.setattr("app.routes.proxy._bridge_hermes_terminal_websocket", fake_bridge)
+    monkeypatch.setattr(proxy.settings, "dedicated_runtime_backend", "hermes")
+
+    await proxy.proxy_terminal_websocket(websocket, token="tok")
+
+    assert called == [(websocket, "container-123")]
+    assert websocket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_hermes_terminal_bridge_relays_docker_exec_output(monkeypatch):
+    from app.routes import proxy
+
+    class FakeTerminalSocket:
+        def __init__(self):
+            self.reads = [b"hello from container\n", b""]
+            self.writes = []
+            self.closed = False
+
+        def recv(self, size):
+            return self.reads.pop(0)
+
+        def sendall(self, data):
+            self.writes.append(data)
+
+        def close(self):
+            self.closed = True
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.accepted = False
+            self.sent = []
+            self.inputs = [
+                json.dumps({"type": "init", "session_key": "terminal:test", "command": "bash -il"}),
+                json.dumps({"type": "input", "data": "pwd\n"}),
+            ]
+
+        async def accept(self):
+            self.accepted = True
+
+        async def receive_text(self):
+            if self.inputs:
+                return self.inputs.pop(0)
+            raise WebSocketDisconnect()
+
+        async def send_text(self, text):
+            self.sent.append(json.loads(text))
+
+        async def close(self, code=1000, reason=None):
+            pass
+
+    terminal_socket = FakeTerminalSocket()
+    monkeypatch.setattr("app.routes.proxy._start_hermes_terminal_socket", lambda container_id, command: terminal_socket)
+
+    websocket = FakeWebSocket()
+    await proxy._bridge_hermes_terminal_websocket(websocket, "container-123")
+
+    assert websocket.accepted is True
+    assert {"type": "started", "command": "bash -il"} in websocket.sent
+    assert {"type": "output", "data": "hello from container\n"} in websocket.sent
+    assert terminal_socket.writes == [b"pwd\n"]
+    assert terminal_socket.closed is True
 
 
 @pytest.mark.asyncio

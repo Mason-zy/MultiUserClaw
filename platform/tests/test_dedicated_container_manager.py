@@ -1,5 +1,6 @@
 import sys
 import types
+from types import SimpleNamespace
 
 from app.config import Settings
 
@@ -94,7 +95,7 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "none")
     monkeypatch.setattr(manager.settings, "container_tz", "Asia/Shanghai")
 
-    env = manager._runtime_environment("container-token")
+    env = manager._runtime_environment("container-token", "sso-token")
 
     assert env["NANOBOT_PROXY__URL"] == "http://gateway:8080/llm/v1"
     assert env["NANOBOT_PROXY__TOKEN"] == "container-token"
@@ -107,6 +108,7 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     assert env["GATEWAY_ALLOW_ALL_USERS"] == "true"
     assert env["OPENAI_API_KEY"] == "proxy-key"
     assert env["HERMES_API_TOOLSETS"] == "none"
+    assert env["INFOX_MED_TOKEN"] == "sso-token"
     assert "BRIDGE_ENABLE_CHANNELS" not in env
 
 
@@ -141,6 +143,57 @@ def test_build_hermes_runtime_files_support_platform_default_model(monkeypatch):
     assert 'HERMES_API_TOOLSETS=none' in env_file
     assert 'HERMES_REASONING_EFFORT=none' in env_file
     assert 'HERMES_SERVICE_TIER=' in env_file
+
+
+def test_write_hermes_runtime_files_repairs_data_volume_ownership(monkeypatch):
+    class RecordingContainer:
+        def __init__(self):
+            self.attrs = {
+                "Mounts": [
+                    {
+                        "Type": "volume",
+                        "Name": "hermes-anonymous-data",
+                        "Destination": "/opt/data",
+                    }
+                ]
+            }
+            self.archives = []
+
+        def put_archive(self, path, data):
+            self.archives.append((path, data))
+            return True
+
+    class RecordingContainerRunner:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(id="repair-container")
+
+    runner = RecordingContainerRunner()
+    monkeypatch.setattr(manager, "_runtime_image", lambda: "nanobot-hermes-agent:latest")
+    monkeypatch.setattr(manager, "_docker", lambda: SimpleNamespace(containers=runner))
+    monkeypatch.setattr(
+        manager.docker.types,
+        "Mount",
+        lambda target, source, type: {"target": target, "source": source, "type": type},
+    )
+
+    container = RecordingContainer()
+
+    manager._write_hermes_runtime_files(container)
+
+    assert container.archives[0][0] == "/opt/data"
+    assert runner.calls == [
+        {
+            "image": "nanobot-hermes-agent:latest",
+            "entrypoint": "chown",
+            "command": ["-R", "hermes:hermes", "/opt/data"],
+            "mounts": [{"target": "/opt/data", "source": "hermes-anonymous-data", "type": "volume"}],
+            "remove": True,
+        }
+    ]
 
 
 def test_hermes_api_toolsets_support_skills_and_full_modes(monkeypatch):
@@ -178,3 +231,31 @@ def test_published_port_bindings_follow_runtime_backend(monkeypatch):
         ("", ""),
         ("127.0.0.1", "40123"),
     )
+
+
+def test_hermes_runtime_rejects_legacy_openclaw_container(monkeypatch):
+    legacy = SimpleNamespace(
+        attrs={
+            "Config": {
+                "Image": "openclaw:latest",
+                "Entrypoint": ["/entrypoint.sh"],
+                "Cmd": ["node", "bridge/dist/bridge/start.js"],
+                "Env": ["BRIDGE_ENABLE_CHANNELS=1"],
+            }
+        }
+    )
+    hermes = SimpleNamespace(
+        attrs={
+            "Config": {
+                "Image": "nanobot-hermes-agent:latest",
+                "Entrypoint": ["/opt/hermes/docker/entrypoint.sh"],
+                "Cmd": ["gateway", "run", "-v"],
+                "Env": ["API_SERVER_ENABLED=true", "HERMES_HOME=/opt/data"],
+            }
+        }
+    )
+
+    monkeypatch.setattr(manager.settings, "dedicated_runtime_backend", "hermes")
+
+    assert manager._container_matches_runtime(legacy) is False
+    assert manager._container_matches_runtime(hermes) is True

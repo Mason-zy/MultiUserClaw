@@ -14,7 +14,7 @@ from app.config import settings
 from app.db.engine import engine
 from app.db.models import Base
 from app.logging_setup import log_settings_summary, setup_logging
-from app.routes import admin, auth, llm, proxy
+from app.routes import admin, auth, llm, proxy,models
 from app.runtime_router import close_runtime_backends
 
 setup_logging()
@@ -170,6 +170,7 @@ app.add_middleware(
 # Mount route groups
 app.include_router(auth.router)
 app.include_router(llm.router)
+app.include_router(models.router)
 app.include_router(openclaw_compat.router)
 app.include_router(proxy.router)
 app.include_router(admin.router)

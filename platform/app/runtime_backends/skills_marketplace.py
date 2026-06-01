@@ -16,7 +16,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _CACHE_DIR = Path.home() / ".nanobot" / "marketplaces" / "recommended-cache"
-_REPO_DIR_NAME = "infoxmed_skills_marketplace"
+_REPO_DIR_NAME = "skills_marketplace"
 _PULL_INTERVAL_SECONDS = 300  # Only pull at most once per 5 minutes
 _last_pull_time: float = 0.0
 _pull_lock = threading.Lock()

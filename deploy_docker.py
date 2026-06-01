@@ -228,6 +228,37 @@ def sync_deploy_copy_to_hermes():
     success("deploy_copy → hermes-agent/deploy_copy/ 已同步")
 
 
+def sync_deploy_copy_to_platform():
+    """将 gateway 需要的 agent metadata 复制到 platform/deploy_copy/。"""
+    deploy_dir = os.path.join(PROJECT_DIR, "deploy_copy")
+    if not os.path.isdir(deploy_dir):
+        return
+
+    dst = os.path.join(PROJECT_DIR, "platform", "deploy_copy")
+    os.makedirs(dst, exist_ok=True)
+
+    for name in os.listdir(dst):
+        if name == ".gitkeep":
+            continue
+        path = os.path.join(dst, name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+
+    for name in ("openclaw_defaults.json", "Agents"):
+        src = os.path.join(deploy_dir, name)
+        if not os.path.exists(src):
+            continue
+        target = os.path.join(dst, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, target)
+        else:
+            shutil.copy2(src, target)
+
+    success("deploy_copy agent metadata → platform/deploy_copy/ 已同步")
+
+
 def _hermes_build_arg_flags(with_browser: bool) -> list[str]:
     flags: list[str] = []
     if with_browser:
@@ -486,6 +517,7 @@ def main():
         # 同步 deploy_copy
         sync_deploy_copy_to_bridge()
         sync_deploy_copy_to_hermes()
+        sync_deploy_copy_to_platform()
 
         if "openclaw" in services:
             warn("当前 hermes 分支默认不再重建 openclaw 基础镜像，已忽略 openclaw 关键字")
@@ -522,6 +554,7 @@ def main():
     # 同步 deploy_copy 到 runtime 构建目录
     sync_deploy_copy_to_bridge()
     sync_deploy_copy_to_hermes()
+    sync_deploy_copy_to_platform()
 
     # 设置 VITE_API_URL（frontend 构建需要）
     api_url = resolve_vite_api_url(args.host, args.gateway_port, args.relative_api)

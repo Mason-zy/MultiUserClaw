@@ -183,13 +183,24 @@ async def _proxy_hermes_models(base_url: str) -> JSONResponse:
     )
 
 
-async def _proxy_hermes_status(base_url: str) -> JSONResponse:
+async def _proxy_hermes_status(base_url: str, user_id: str = "") -> JSONResponse:
     response = await _hermes_request("GET", base_url, "/health")
     payload = _safe_json_payload(response)
     connected = response.status_code < 400 and (
         not isinstance(payload, dict)
         or str(payload.get("status") or "").lower() in {"", "ok", "healthy", "ready"}
     )
+    current_model = settings.default_model
+    if user_id:
+        try:
+            from app.routes.models import _read_container_config
+            container_name = f"{settings.dedicated_runtime_container_name_prefix}-{user_id[:8]}"
+            config = _read_container_config(container_name)
+            model_section = config.get("model") or {}
+            if isinstance(model_section, dict) and model_section.get("default"):
+                current_model = model_section["default"]
+        except Exception:
+            pass
     return JSONResponse(
         status_code=response.status_code,
         content={
@@ -197,7 +208,7 @@ async def _proxy_hermes_status(base_url: str) -> JSONResponse:
             "gateway_connected": connected,
             "config_path": "platform://hermes",
             "workspace": "/workspace",
-            "model": settings.default_model,
+            "model": current_model,
             "runtime": "hermes",
             "upstream": payload,
         },
@@ -351,6 +362,8 @@ def _hermes_empty_compat(path: str, request: Request) -> JSONResponse | None:
 
 async def _container_url(db: AsyncSession, user: User) -> str:
     """Get the internal URL for the user's openclaw container, starting it if needed."""
+    if user.runtime_mode == "shared":
+        raise HTTPException(status_code=409, detail="User is assigned to shared OpenClaw mode; use /api/shared-openclaw instead")
     # Local dev mode: bypass Docker, forward to local openclaw web directly
     if settings.dev_openclaw_url:
         return settings.dev_openclaw_url
@@ -665,7 +678,7 @@ async def proxy_http(
 
     if _dedicated_runtime_backend() == "hermes":
         if path == "status" and request.method == "GET":
-            return await _proxy_hermes_status(base_url)
+            return await _proxy_hermes_status(base_url, user.id)
         if path == "models" and request.method == "GET":
             return await _proxy_hermes_models(base_url)
         if path == "models/config" and request.method == "PUT":

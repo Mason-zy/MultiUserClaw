@@ -78,11 +78,14 @@ async def create_user(
     username: str,
     email: str,
     password: str,
+    *,
+    runtime_mode: str = "dedicated",
 ) -> User:
     user = User(
         username=username,
         email=email,
         password_hash=hash_password(password),
+        runtime_mode=runtime_mode,
     )
     db.add(user)
     await db.commit()
@@ -100,6 +103,8 @@ async def create_or_update_sso_user(
     sso_uid: str,
     sso_token: str,
     display_name: str = "",
+    *,
+    runtime_mode_for_new_user: str = "dedicated",
 ) -> User:
     """Create or update a user from InfoX-Med SSO login.
 
@@ -128,6 +133,7 @@ async def create_or_update_sso_user(
         password_hash=hash_password(random_pw),
         sso_uid=sso_uid,
         sso_token=sso_token,
+        runtime_mode=runtime_mode_for_new_user,
     )
     db.add(user)
     await db.commit()

@@ -1,6 +1,7 @@
 import sys
 import types
 
+from fastapi import UploadFile
 import pytest
 from fastapi import HTTPException
 from app.db.models import User
@@ -66,6 +67,113 @@ async def test_openclaw_prewarm_route_uses_runtime_backend(monkeypatch):
     payload = await openclaw_compat.prewarm_dedicated_runtime(make_user())
 
     assert payload == {"ok": True, "status": "ready"}
+
+
+@pytest.mark.asyncio
+async def test_openclaw_agent_files_route_reads_packaged_agent_files(monkeypatch, tmp_path):
+    from app.api_compat import openclaw_compat
+    from app.runtime_backends import hermes_agents
+
+    deploy_copy = tmp_path / "deploy_copy"
+    agent_dir = deploy_copy / "Agents" / "main"
+    agent_dir.mkdir(parents=True)
+    soul = agent_dir / "SOUL.md"
+    soul.write_text("你是 Medclaw 助手\n", encoding="utf-8")
+    (agent_dir / "IDENTITY.md").write_text("name: main\n", encoding="utf-8")
+
+    monkeypatch.setattr(hermes_agents, "_deploy_copy_dir", lambda: deploy_copy)
+
+    files_payload = await openclaw_compat.list_dedicated_agent_files("main", make_user())
+    content_payload = await openclaw_compat.get_dedicated_agent_file("main", "SOUL.md", make_user())
+
+    assert files_payload["agentId"] == "main"
+    assert files_payload["workspace"] == "Agents/main"
+    assert {item["name"] for item in files_payload["files"]} == {"IDENTITY.md", "SOUL.md"}
+    assert content_payload == {
+        "agentId": "main",
+        "workspace": "Agents/main",
+        "file": {"name": "SOUL.md", "content": "你是 Medclaw 助手\n"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_openclaw_skill_upload_route_uses_hermes_container(monkeypatch):
+    from app.api_compat import openclaw_compat
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def fake_ensure_running(db, user_id):
+        assert user_id == "u1"
+        return types.SimpleNamespace(docker_id="docker-123")
+
+    async def fake_upload(container_id, file):
+        assert container_id == "docker-123"
+        assert file.filename == "demo-skill.zip"
+        return {"name": "demo-skill", "description": "Demo", "source": "hermes", "disabled": False}
+
+    monkeypatch.setattr(openclaw_compat, "async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr(openclaw_compat, "ensure_running", fake_ensure_running)
+    monkeypatch.setattr(openclaw_compat, "upload_skill_zip_to_hermes_container", fake_upload)
+
+    payload = await openclaw_compat.upload_dedicated_skill_zip(
+        UploadFile(filename="demo-skill.zip", file=types.SimpleNamespace()),
+        make_user(),
+    )
+
+    assert payload == {"name": "demo-skill", "description": "Demo", "source": "hermes", "disabled": False}
+
+
+@pytest.mark.asyncio
+async def test_openclaw_skill_search_route_matches_installed_hermes_skill_paths(monkeypatch):
+    from app.api_compat import openclaw_compat
+
+    class FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def fake_ensure_running(db, user_id):
+        assert user_id == "u1"
+        return types.SimpleNamespace(docker_id="docker-123")
+
+    def fake_list_skills(container_id):
+        assert container_id == "docker-123"
+        return [
+            {
+                "name": "brainstorming",
+                "description": "Explores user intent",
+                "source": "hermes",
+                "disabled": False,
+                "path": "superpowers-main/brainstorming",
+            }
+        ]
+
+    monkeypatch.setattr(openclaw_compat, "async_session", lambda: FakeAsyncSessionContext())
+    monkeypatch.setattr(openclaw_compat, "ensure_running", fake_ensure_running)
+    monkeypatch.setattr(openclaw_compat, "list_skills_from_hermes_container", fake_list_skills)
+
+    payload = await openclaw_compat.search_dedicated_skills(
+        openclaw_compat.SkillSearchRequest(query="super", limit=10),
+        make_user(),
+    )
+
+    assert payload["results"] == [
+        {
+            "slug": "brainstorming",
+            "url": "local://superpowers-main/brainstorming",
+            "installs": "installed",
+            "description": "Explores user intent",
+            "source": "hermes",
+            "path": "superpowers-main/brainstorming",
+        }
+    ]
 
 
 @pytest.mark.asyncio

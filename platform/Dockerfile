@@ -17,6 +17,7 @@ RUN uv pip install --system --no-cache -r pyproject.toml --default-index https:/
 COPY app/ app/
 COPY alembic/ alembic/
 COPY alembic.ini ./
+COPY deploy_copy/ deploy_copy/
 
 EXPOSE 8080
 

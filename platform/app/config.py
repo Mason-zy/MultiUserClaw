@@ -40,6 +40,7 @@ class Settings(BaseSettings):
 
     # Runtime backend selection
     dedicated_runtime_backend: str = "hermes"
+    shared_runtime_backend: str = "hermes"
     hermes_connect_retries: int = 60
     hermes_retry_delay_seconds: float = 0.5
     hermes_api_toolsets: str = "terminal,file,skills"
@@ -59,6 +60,13 @@ class Settings(BaseSettings):
     dedicated_runtime_data_volume_prefix: str = "hermes-data"
     container_network: str = "openclaw-internal"
 
+    # Shared runtime endpoints/tokens，共享 runtime 容器时的参数
+    shared_openclaw_enabled: bool = True
+    shared_openclaw_url: str = "http://shared-openclaw:18080"
+    shared_hermes_url: str = "http://shared-openclaw:8080"
+    shared_hermes_api_key: str = "dev-hermes-bridge-key"
+    shared_openclaw_timeout_seconds: int = 120
+    shared_openclaw_system_token: str = ""
     user_container_publish_ports: bool = True
     user_container_bind_ip: str = "0.0.0.0"
     container_tz: str = "Asia/Shanghai"

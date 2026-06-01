@@ -99,6 +99,12 @@ def _runtime_image() -> str:
     return settings.openclaw_image
 
 
+def _runtime_mount_target() -> str:
+    if _runtime_backend() == "hermes":
+        return "/workspace"
+    return "/root/.openclaw"
+
+
 def _build_runtime_mounts(data_vol: str, short_id: str) -> list:
     """Build volume mounts for the user container.
 
@@ -107,7 +113,7 @@ def _build_runtime_mounts(data_vol: str, short_id: str) -> list:
       - ``/opt/data``    — HERMES_HOME (profiles, config, skills cache)
     """
     mounts = [
-        docker.types.Mount("/workspace", data_vol, type="volume"),
+        docker.types.Mount(_runtime_mount_target(), data_vol, type="volume"),
     ]
     if _runtime_backend() == "hermes":
         home_vol = _hermes_home_volume_name(short_id)
@@ -121,7 +127,7 @@ def _runtime_command() -> list[str]:
     return ["node", "bridge/dist/bridge/start.js"]
 
 
-def _runtime_environment(container_token: str) -> dict[str, str]:
+def _runtime_environment(container_token: str, sso_token: str | None) -> dict[str, str]:
     env = {
         "NANOBOT_PROXY__URL": "http://gateway:8080/llm/v1",
         "NANOBOT_PROXY__TOKEN": container_token,
@@ -143,8 +149,11 @@ def _runtime_environment(container_token: str) -> dict[str, str]:
                 "HERMES_API_TOOLSETS": settings.hermes_api_toolsets,
                 "HERMES_REASONING_EFFORT": settings.hermes_reasoning_effort,
                 "HERMES_SERVICE_TIER": settings.hermes_service_tier,
+                "HERMES_YOLO_MODE": "true",
             }
         )
+    if sso_token:
+        env["INFOX_MED_TOKEN"] = sso_token
     return env
 
 
@@ -398,8 +407,27 @@ def _repair_hermes_data_ownership(container: docker.models.containers.Container)
         raise RuntimeError(f"failed to repair Hermes data ownership: {output}")
 
 
+def _read_existing_hermes_config(container: docker.models.containers.Container) -> dict:
+    """Read existing config.yaml from container, return {} if not found."""
+    try:
+        result = container.exec_run(["cat", "/opt/data/config.yaml"], user="root")
+        if result.exit_code == 0 and result.output:
+            return yaml.safe_load(result.output.decode("utf-8")) or {}
+    except Exception:
+        pass
+    return {}
+
+
 def _write_hermes_runtime_files(container: docker.models.containers.Container) -> None:
-    config_content = _build_hermes_config_yaml().encode("utf-8")
+    platform_config = yaml.safe_load(_build_hermes_config_yaml()) or {}
+    existing_config = _read_existing_hermes_config(container)
+
+    if existing_config.get("custom_providers"):
+        platform_config["custom_providers"] = existing_config["custom_providers"]
+    if (existing_config.get("model") or {}).get("default"):
+        platform_config.setdefault("model", {})["default"] = existing_config["model"]["default"]
+
+    config_content = yaml.safe_dump(platform_config, allow_unicode=True, sort_keys=False).encode("utf-8")
     env_content = _build_hermes_env_file().encode("utf-8")
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
@@ -617,7 +645,12 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     except DockerNotFound:
         pass
 
-    container_env = _runtime_environment(container_token)
+    # Fetch user's SSO token if available (e.g. InfoX-Med)
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user_row = user_result.scalar_one_or_none()
+    sso_token = user_row.sso_token if user_row else None
+
+    container_env = _runtime_environment(container_token, sso_token)
 
     run_kwargs = {
         "image": _runtime_image(),

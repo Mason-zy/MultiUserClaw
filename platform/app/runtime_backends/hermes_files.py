@@ -17,6 +17,8 @@ from app.container.manager import get_docker_container
 DEFAULT_HERMES_UPLOAD_DIR = "workspace/uploads"
 HERMES_DATA_ROOT = "/opt/data"
 HERMES_DATA_ROOTS = (HERMES_DATA_ROOT, "/workspace")
+SHARED_HERMES_CONTAINER_NAME = "openclaw-shared"
+
 
 def _exec_output(result) -> tuple[int, bytes]:
     if isinstance(result, tuple):
@@ -124,6 +126,8 @@ def normalize_hermes_read_path(requested_path: str | None) -> str:
             or normalized.startswith("/root/.agent-browser/tmp/")
             or normalized == "/home"
             or normalized.startswith("/home/")
+            or normalized == "/opt/hermes"
+            or normalized.startswith("/opt/hermes/")
         ):
             return normalized
     else:
@@ -464,25 +468,35 @@ def read_file_from_hermes_container(
     try:
         stream, _stat = container.get_archive(archive_path)
     except DockerNotFound as exc:
-        fallback_path = _legacy_script_fallback_path(container, archive_path)
-        if not fallback_path:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Hermes file not found",
-            ) from exc
-        media_path = fallback_path
-        try:
-            stream, _stat = container.get_archive(fallback_path)
-        except DockerNotFound as fallback_exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Hermes file not found",
-            ) from fallback_exc
-        except DockerAPIError as fallback_exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to read Hermes file",
-            ) from fallback_exc
+        hermes_fallback_found = False
+        if archive_path.startswith("/opt/data/"):
+            alt = "/opt/hermes/" + archive_path.removeprefix("/opt/data/")
+            try:
+                stream, _stat = container.get_archive(alt)
+                media_path = alt
+                hermes_fallback_found = True
+            except Exception:
+                pass
+        if not hermes_fallback_found:
+            fallback_path = _legacy_script_fallback_path(container, archive_path)
+            if not fallback_path:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Hermes file not found",
+                ) from exc
+            media_path = fallback_path
+            try:
+                stream, _stat = container.get_archive(fallback_path)
+            except DockerNotFound as fallback_exc:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Hermes file not found",
+                ) from fallback_exc
+            except DockerAPIError as fallback_exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to read Hermes file",
+                ) from fallback_exc
     except DockerAPIError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

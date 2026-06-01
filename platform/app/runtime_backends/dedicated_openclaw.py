@@ -161,7 +161,7 @@ class DedicatedOpenClawBackend(RuntimeBackend):
             user = await get_user_by_id(db, payload["sub"])
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
-            stream_ctx = RuntimeContext(user=user)
+            stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
             base_url = await self._base_url(stream_ctx)
 
         target_url = f"{base_url}/api/events/stream"
@@ -190,7 +190,7 @@ class DedicatedOpenClawBackend(RuntimeBackend):
             user = await get_user_by_id(db, payload["sub"])
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
-            stream_ctx = RuntimeContext(user=user)
+            stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
             base_url = await self._base_url(stream_ctx)
 
         target_url = f"{base_url}/api/runs/{run_id}/events"

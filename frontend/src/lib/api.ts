@@ -166,11 +166,15 @@ let refreshPromise: Promise<boolean> | null = null
 
 async function parseErrorMessage(res: Response): Promise<string> {
   try {
-    const data = await res.json() as { detail?: string; message?: string }
-    return data.detail || data.message || `请求失败 (${res.status})`
-  } catch {
     const body = await res.text()
-    return body || `请求失败 (${res.status})`
+    try {
+      const data = JSON.parse(body) as { detail?: string; message?: string }
+      return data.detail || data.message || `请求失败 (${res.status})`
+    } catch {
+      return body || `请求失败 (${res.status})`
+    }
+  } catch {
+    return `请求失败 (${res.status})`
   }
 }
 

@@ -29,6 +29,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")  # user | admin
     quota_tier: Mapped[str] = mapped_column(String(16), nullable=False, default="free")  # free | basic | pro
+    # 运行模式，dedicated表示独立容器，shared表示用户共享openclaw
+    runtime_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="dedicated", server_default="dedicated")  # dedicated | shared
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # SSO fields (e.g. 如果需要SSO登录，需要这2个字段)
     # sso_uid: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)

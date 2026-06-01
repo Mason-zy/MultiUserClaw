@@ -45,11 +45,14 @@ const ABSOLUTE_PATH_RE =
 export function isFilePath(href: string): boolean {
   if (!href) return false
   if (/^https?:\/\//i.test(href)) return false
+  // ReactMarkdown 会对中文等字符进行 URL 编码，先解码再匹配
+  let decoded = href
+  try { decoded = decodeURIComponent(href) } catch { /* keep original */ }
   // workspace 路径
-  if (OPENCLAW_PATH_RE.test(href)) return true
+  if (OPENCLAW_PATH_RE.test(decoded)) return true
   // 绝对路径且有已知扩展名
-  if (ABSOLUTE_PATH_RE.test(href)) {
-    const ext = getExt(href)
+  if (ABSOLUTE_PATH_RE.test(decoded)) {
+    const ext = getExt(decoded)
     return FILE_EXTENSIONS.has(ext)
   }
   return false
@@ -57,7 +60,9 @@ export function isFilePath(href: string): boolean {
 
 /** 判断路径是否在 .openclaw 下（走 download API）还是绝对路径（走 serve API） */
 function isOpenclawPath(href: string): boolean {
-  return OPENCLAW_PATH_RE.test(href)
+  let decoded = href
+  try { decoded = decodeURIComponent(href) } catch { /* keep original */ }
+  return OPENCLAW_PATH_RE.test(decoded)
 }
 
 /**

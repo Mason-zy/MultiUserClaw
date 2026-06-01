@@ -24,3 +24,13 @@ def test_settings_expose_shared_runtime_selector_fields():
     assert settings.shared_runtime_backend == "hermes"
     assert settings.shared_hermes_url == "http://shared-openclaw:8080"
     assert settings.shared_hermes_api_key == "dev-hermes-bridge-key"
+
+
+def test_settings_expose_disabled_training_trace_defaults():
+    settings = Settings()
+
+    assert settings.training_trace_enabled is False
+    assert settings.training_trace_ingest_enabled is False
+    assert settings.training_trace_ingest_token == ""
+    assert settings.training_trace_dir == ".hermes/training_traces"
+    assert settings.training_trace_hash_salt == ""

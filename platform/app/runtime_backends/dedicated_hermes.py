@@ -144,7 +144,7 @@ class DedicatedHermesBackend:
             self._api_ready_keys.add(ready_key)
             logger.info(
                 "hermes_api_ready scope=%s user_id=%s elapsed_ms=%.1f base_url=%s runtime_id=%s",
-                "dedicated",
+                ctx.scope,
                 ctx.user.id,
                 _elapsed_ms(started_at),
                 base_url,
@@ -166,7 +166,7 @@ class DedicatedHermesBackend:
             )
         logger.info(
             "hermes_runtime_ready scope=%s user_id=%s elapsed_ms=%.1f host=%s port=%s",
-            "dedicated",
+            ctx.scope,
             ctx.user.id,
             _elapsed_ms(started_at),
             container.internal_host,
@@ -315,11 +315,14 @@ class DedicatedHermesBackend:
             "readonly": True,
         }
 
-    async def get_agent_info(self, ctx: RuntimeContext) -> dict:
+    async def get_agent_info(self, ctx: RuntimeContext, container_agents: list[dict] | None = None) -> dict:
         payload = await (await self._client(ctx)).get_models()
         models = payload.get("data") if isinstance(payload, dict) else []
         return build_agent_info(
             models if isinstance(models, list) else [],
+            scope=ctx.scope,
+            runtime_mode=ctx.user.runtime_mode,
+            container_agents=container_agents,
         )
 
     async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
@@ -391,7 +394,7 @@ class DedicatedHermesBackend:
             if exc.status_code != status.HTTP_404_NOT_FOUND:
                 logger.debug(
                     "hermes_session_history_unavailable scope=%s user_id=%s session_key=%s status=%s",
-                    "dedicated",
+                    ctx.scope,
                     ctx.user.id,
                     session_key,
                     exc.status_code,
@@ -400,7 +403,7 @@ class DedicatedHermesBackend:
         except Exception as exc:
             logger.debug(
                 "hermes_session_history_unavailable scope=%s user_id=%s session_key=%s error=%s",
-                "dedicated",
+                ctx.scope,
                 ctx.user.id,
                 session_key,
                 exc,
@@ -423,7 +426,7 @@ class DedicatedHermesBackend:
         effective_session_key = payload.get("session_id") if isinstance(payload, dict) else None
         logger.info(
             "hermes_run_started scope=%s user_id=%s session_key=%s run_id=%s elapsed_ms=%.1f",
-            "dedicated",
+            ctx.scope,
             ctx.user.id,
             effective_session_key or session_key,
             run_id or "",
@@ -451,7 +454,7 @@ class DedicatedHermesBackend:
         status_text, final_message = summarize_run_events(events)
         logger.info(
             "hermes_run_finished scope=%s user_id=%s run_id=%s status=%s first_event_ms=%s first_delta_ms=%s first_visible_delta_ms=%s elapsed_ms=%.1f event_count=%d",
-            "dedicated",
+            ctx.scope,
             ctx.user.id,
             run_id,
             status_text,
@@ -612,7 +615,7 @@ class DedicatedHermesBackend:
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
 
-        stream_ctx = RuntimeContext(user=user)
+        stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
         base_url = await self._resolve_base_url(stream_ctx)
         target_url = f"{base_url}/api/hermes/events/stream"
         headers = {}
@@ -668,7 +671,7 @@ class DedicatedHermesBackend:
             if user is None or not user.is_active:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
 
-        stream_ctx = RuntimeContext(user=user)
+        stream_ctx = RuntimeContext(user=user, scope=ctx.scope)
         target_url = f"{await self._resolve_base_url(stream_ctx)}/v1/runs/{run_id}/events"
         headers = {}
         if settings.dedicated_hermes_api_key:
