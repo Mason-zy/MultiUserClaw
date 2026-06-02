@@ -799,6 +799,31 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
             # Container was removed externally — recreate
             return await recreate_record(record)
 
+    elif record.status == "stopped":
+        try:
+            c = client.containers.get(record.docker_id)
+            if not _container_matches_runtime(c):
+                return await recreate_record(record, c)
+            c.start()
+            c.reload()
+            # Sync internal IP after start
+            nets = c.attrs.get("NetworkSettings", {}).get("Networks", {})
+            for net_info in nets.values():
+                current_ip = net_info.get("IPAddress", "")
+                if current_ip:
+                    record.internal_host = current_ip
+                    break
+            await db.execute(
+                update(Container)
+                .where(Container.id == record.id)
+                .values(status="running", internal_host=record.internal_host)
+            )
+            await db.commit()
+            record.status = "running"
+        except DockerNotFound:
+            # Container was removed externally — recreate
+            return await recreate_record(record)
+
     elif record.status == "archived":
         # Recreate from persisted data volumes
         return await recreate_record(record)

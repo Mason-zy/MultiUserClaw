@@ -202,8 +202,8 @@ async def list_users(
             container_status=row.container_status,
             container_docker_id=row.container_docker_id,
             container_created_at=row.container_created_at.isoformat() if row.container_created_at else None,
-            shared_agent_id=row.shared_agent_id,
-            shared_agent_status=row.shared_agent_status,
+            shared_agent_id=None,
+            shared_agent_status=None,
             tokens_used_today=row.tokens_used_today,
         )
         for row in rows
