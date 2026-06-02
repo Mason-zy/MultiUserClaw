@@ -14,10 +14,13 @@ from fastapi import HTTPException, UploadFile, status
 
 from app.container.manager import get_docker_container
 
-DEFAULT_HERMES_UPLOAD_DIR = "workspace/uploads"
+DEFAULT_HERMES_UPLOAD_DIR = "profiles/main/workspace/uploads"
 HERMES_DATA_ROOT = "/opt/data"
 HERMES_DATA_ROOTS = (HERMES_DATA_ROOT, "/workspace")
-SHARED_HERMES_CONTAINER_NAME = "openclaw-shared"
+_HERMES_PROFILE_PREFIX = "profiles/"
+HERMES_USER = "hermes"
+HERMES_UID = 10000
+HERMES_GID = 10000
 
 
 def _exec_output(result) -> tuple[int, bytes]:
@@ -31,13 +34,66 @@ def _exec_output(result) -> tuple[int, bytes]:
     return int(exit_code or 0), output or b""
 
 
+def _mark_hermes_owned(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    info.uid = HERMES_UID
+    info.gid = HERMES_GID
+    info.uname = HERMES_USER
+    info.gname = HERMES_USER
+    return info
+
+
+def chown_hermes_path(container, absolute_path: str) -> None:
+    quoted = shlex.quote(absolute_path)
+    result = container.exec_run(["sh", "-lc", f"chown -R hermes:hermes -- {quoted}"], user="root")
+    exit_code, output = _exec_output(result)
+    if exit_code != 0:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=output.decode("utf-8", errors="replace") or "Failed to repair Hermes file ownership",
+        )
+
+
+def _normalize_profile_storage_path(path: str, default_agent: str = "main") -> str:
+    normalized = posixpath.normpath((path or "").strip().replace("\\", "/").lstrip("/"))
+    if normalized in {"", "."}:
+        return f"profiles/{default_agent}/workspace"
+    if normalized == ".." or normalized.startswith("../"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Hermes file path cannot escape the workspace",
+        )
+    if normalized.startswith(_HERMES_PROFILE_PREFIX):
+        parts = normalized.split("/")
+        if len(parts) >= 3 and parts[0] == "profiles" and parts[1] and parts[2] in {"workspace", "skills", "memories"}:
+            return normalized.rstrip("/")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Hermes profile path is unavailable",
+        )
+    if normalized == "workspace":
+        return "profiles/main/workspace"
+    if normalized.startswith("workspace/"):
+        return f"profiles/{default_agent}/workspace/{normalized[len('workspace/'):]}".rstrip("/")
+    if normalized.startswith("workspace-"):
+        head, _, tail = normalized.partition("/")
+        agent = head.removeprefix("workspace-")
+        if not agent:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Hermes workspace path is unavailable",
+            )
+        suffix = f"/{tail}" if tail else ""
+        return f"profiles/{agent}/workspace{suffix}".rstrip("/")
+    return f"profiles/{default_agent}/workspace/{normalized}".rstrip("/")
+
+
 def normalize_hermes_upload_dir(target_dir: str | None, default: str = DEFAULT_HERMES_UPLOAD_DIR) -> str:
     raw = (target_dir or default).strip().replace("\\", "/")
     raw = raw.removeprefix("~/.openclaw/")
     raw = raw.removeprefix("/root/.openclaw/")
     raw = raw.removeprefix("root/.openclaw/")
-    raw = raw.lstrip("/")
-    normalized = posixpath.normpath(raw or default)
+    raw = raw.removeprefix("/opt/data/")
+    normalized = _normalize_profile_storage_path(raw or default)
     if normalized in {"", "."}:
         normalized = default
     if normalized == ".." or normalized.startswith("../"):
@@ -45,11 +101,7 @@ def normalize_hermes_upload_dir(target_dir: str | None, default: str = DEFAULT_H
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Hermes upload path cannot escape the workspace",
         )
-    if not (
-        normalized == "workspace"
-        or normalized.startswith("workspace/")
-        or normalized.startswith("workspace-")
-    ):
+    if "/workspace" not in normalized:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Hermes upload path must be under a workspace directory",
@@ -62,18 +114,9 @@ def normalize_hermes_workspace_path(requested_path: str | None) -> str:
     raw = raw.removeprefix("~/.openclaw/")
     raw = raw.removeprefix("/root/.openclaw/")
     raw = raw.removeprefix("root/.openclaw/")
-    raw = raw.lstrip("/")
-    normalized = posixpath.normpath(raw)
+    raw = raw.removeprefix("/opt/data/")
+    normalized = _normalize_profile_storage_path(raw)
     if normalized in {"", ".", ".."} or normalized.startswith("../"):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Hermes file path is unavailable",
-        )
-    if not (
-        normalized == "workspace"
-        or normalized.startswith("workspace/")
-        or normalized.startswith("workspace-")
-    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Hermes file path is unavailable",
@@ -86,22 +129,8 @@ def normalize_hermes_filemanager_path(requested_path: str | None) -> str:
     raw = raw.removeprefix("~/.openclaw/")
     raw = raw.removeprefix("/root/.openclaw/")
     raw = raw.removeprefix("root/.openclaw/")
-    raw = raw.lstrip("/")
-    normalized = posixpath.normpath(raw)
-    if normalized in {"", "."}:
-        return "workspace"
-    if normalized == ".." or normalized.startswith("../"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Hermes file path cannot escape the workspace",
-        )
-    if (
-        normalized == "workspace"
-        or normalized.startswith("workspace/")
-        or normalized.startswith("workspace-")
-    ):
-        return normalized.rstrip("/")
-    return f"workspace/{normalized}".rstrip("/")
+    raw = raw.removeprefix("/opt/data/")
+    return _normalize_profile_storage_path(raw)
 
 
 def normalize_hermes_read_path(requested_path: str | None) -> str:
@@ -111,10 +140,15 @@ def normalize_hermes_read_path(requested_path: str | None) -> str:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Hermes file path is unavailable",
         )
+    raw = raw.removeprefix("~/.openclaw/")
+    raw = raw.removeprefix("/root/.openclaw/")
+    raw = raw.removeprefix("root/.openclaw/")
     if raw.startswith("/"):
         normalized = posixpath.normpath(raw)
         if normalized == "/workspace" or normalized.startswith("/workspace/"):
-            return f"{HERMES_DATA_ROOT}{normalized}"
+            return f"{HERMES_DATA_ROOT}/profiles/main{normalized}"
+        if normalized.startswith("/workspace-"):
+            return f"{HERMES_DATA_ROOT}/{_normalize_profile_storage_path(normalized)}"
         if (
             normalized == "/tmp"
             or normalized.startswith("/tmp/")
@@ -149,24 +183,20 @@ from datetime import datetime, timezone
 root = "/opt/data"
 storage_path = sys.argv[1]
 target = os.path.realpath(os.path.join(root, storage_path))
-workspace = os.path.realpath(os.path.join(root, "workspace"))
-root_real = os.path.realpath(root)
+profiles = os.path.realpath(os.path.join(root, "profiles"))
 
 def fail(code, detail):
     print(json.dumps({"detail": detail}))
     raise SystemExit(code)
 
-if not (target == workspace or target.startswith(workspace + os.sep) or (target.startswith(root_real + os.sep) and os.path.basename(target).startswith("workspace-"))):
+parts = target.split(os.sep)
+if not (target.startswith(profiles + os.sep) and "workspace" in parts):
     fail(2, "Hermes file path is unavailable")
 if not os.path.exists(target):
     fail(4, "Hermes file not found")
 
 def display_path(storage_rel):
     storage_rel = storage_rel.strip("/")
-    if storage_rel == "workspace":
-        return ""
-    if storage_rel.startswith("workspace/"):
-        return storage_rel[len("workspace/"):]
     return storage_rel
 
 def iso(ts):
@@ -192,7 +222,7 @@ if os.path.isdir(target):
     payload = {
         "type": "directory",
         "path": display_path(os.path.relpath(target, root).replace(os.sep, "/")),
-        "root": "/opt/data/workspace",
+        "root": "/opt/data/profiles",
         "items": items,
         "runtime": "hermes",
     }
@@ -266,14 +296,49 @@ def make_hermes_filemanager_directory(container_id_or_name: str | None, requeste
             detail="Hermes runtime container is unavailable",
         ) from exc
     absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
-    result = container.exec_run(["sh", "-lc", f"mkdir -p -- {shlex.quote(absolute_path)}"])
+    result = container.exec_run(["sh", "-lc", f"mkdir -p -- {shlex.quote(absolute_path)}"], user=HERMES_USER)
     exit_code, output = _exec_output(result)
     if exit_code != 0:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=output.decode("utf-8", errors="replace") or "Failed to create Hermes directory",
-        )
+        result = container.exec_run(["sh", "-lc", f"mkdir -p -- {shlex.quote(absolute_path)}"], user="root")
+        exit_code, output = _exec_output(result)
+        if exit_code != 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=output.decode("utf-8", errors="replace") or "Failed to create Hermes directory",
+            )
+    chown_hermes_path(container, absolute_path)
     return {"ok": True, "path": storage_path, "runtime": "hermes"}
+
+
+def write_hermes_filemanager_file(container_id_or_name: str | None, requested_path: str | None, content: str) -> dict:
+    if not container_id_or_name:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Hermes runtime container is unavailable",
+        )
+    storage_path = normalize_hermes_filemanager_path(requested_path)
+    if storage_path.endswith("/"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Hermes file path must include a file name")
+    if storage_path.endswith("/workspace") or storage_path == "profiles/main/workspace":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Hermes file path must include a file name")
+    try:
+        container = get_docker_container(container_id_or_name)
+    except DockerNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Hermes runtime container is unavailable",
+        ) from exc
+
+    archive = _build_upload_archive(storage_path, content.encode("utf-8"))
+    try:
+        _ensure_openclaw_compat_links(container)
+        ok = container.put_archive(HERMES_DATA_ROOT, archive)
+        chown_hermes_path(container, f"{HERMES_DATA_ROOT}/{posixpath.dirname(storage_path)}")
+    except DockerAPIError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to write Hermes file") from exc
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to write Hermes file")
+    return browse_hermes_filemanager(container_id_or_name, storage_path)
 
 
 def delete_hermes_filemanager_path(container_id_or_name: str | None, requested_path: str | None) -> dict:
@@ -283,7 +348,7 @@ def delete_hermes_filemanager_path(container_id_or_name: str | None, requested_p
             detail="Hermes runtime container is unavailable",
         )
     storage_path = normalize_hermes_filemanager_path(requested_path)
-    if storage_path == "workspace":
+    if storage_path.endswith("/workspace") or storage_path == "profiles/main/workspace":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete Hermes workspace root")
     try:
         container = get_docker_container(container_id_or_name)
@@ -333,6 +398,22 @@ def _legacy_script_fallback_path(container, requested_path: str) -> str | None:
     return found
 
 
+def _legacy_profile_fallback_path(archive_path: str) -> str | None:
+    prefix = f"{HERMES_DATA_ROOT}/profiles/"
+    if not archive_path.startswith(prefix):
+        return None
+    rel = archive_path[len(prefix):]
+    parts = rel.split("/", 3)
+    if len(parts) < 3 or parts[1] != "workspace":
+        return None
+    agent = parts[0]
+    tail = parts[2] if len(parts) == 3 else f"{parts[2]}/{parts[3]}"
+    if not agent or agent in {".", ".."} or "/" in agent:
+        return None
+    legacy_base = "workspace" if agent == "main" else f"workspace-{agent}"
+    return f"{HERMES_DATA_ROOT}/{legacy_base}/{tail}".rstrip("/")
+
+
 def _safe_filename(filename: str | None) -> str:
     normalized = (filename or "upload.bin").replace("\\", "/").rsplit("/", 1)[-1].strip()
     return normalized or "upload.bin"
@@ -348,14 +429,14 @@ def _build_upload_archive(relative_path: str, contents: bytes) -> bytes:
         home_dir.type = tarfile.DIRTYPE
         home_dir.mode = 0o755
         home_dir.mtime = now
-        tar.addfile(home_dir)
+        tar.addfile(_mark_hermes_owned(home_dir))
 
         openclaw_link = tarfile.TarInfo(name="home/.openclaw")
         openclaw_link.type = tarfile.SYMTYPE
         openclaw_link.linkname = HERMES_DATA_ROOT
         openclaw_link.mode = 0o777
         openclaw_link.mtime = now
-        tar.addfile(openclaw_link)
+        tar.addfile(_mark_hermes_owned(openclaw_link))
 
         current_dir = ""
         for part in upload_dir.split("/"):
@@ -366,13 +447,13 @@ def _build_upload_archive(relative_path: str, contents: bytes) -> bytes:
             directory.type = tarfile.DIRTYPE
             directory.mode = 0o755
             directory.mtime = now
-            tar.addfile(directory)
+            tar.addfile(_mark_hermes_owned(directory))
 
         upload_file = tarfile.TarInfo(name=relative_path)
         upload_file.size = len(contents)
         upload_file.mode = 0o644
         upload_file.mtime = now
-        tar.addfile(upload_file, io.BytesIO(contents))
+        tar.addfile(_mark_hermes_owned(upload_file), io.BytesIO(contents))
 
     tar_buffer.seek(0)
     return tar_buffer.read()
@@ -385,8 +466,7 @@ def _ensure_openclaw_compat_links(container) -> None:
             "-lc",
             "mkdir -p /opt/data/home /root "
             "&& ln -sfn /opt/data /opt/data/home/.openclaw "
-            "&& ln -sfn /opt/data /root/.openclaw "
-            "&& ln -sfn /opt/data /opt/data/.openclaw",
+            "&& ln -sfn /opt/data /root/.openclaw",
         ]
     )
     exit_code = getattr(result, "exit_code", result[0] if isinstance(result, tuple) else 0)
@@ -419,6 +499,7 @@ async def write_upload_to_hermes_container(
         container = get_docker_container(container_id_or_name)
         _ensure_openclaw_compat_links(container)
         ok = container.put_archive(HERMES_DATA_ROOT, archive)
+        chown_hermes_path(container, f"{HERMES_DATA_ROOT}/{upload_dir}")
     except DockerNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -468,35 +549,25 @@ def read_file_from_hermes_container(
     try:
         stream, _stat = container.get_archive(archive_path)
     except DockerNotFound as exc:
-        hermes_fallback_found = False
-        if archive_path.startswith("/opt/data/"):
-            alt = "/opt/hermes/" + archive_path.removeprefix("/opt/data/")
-            try:
-                stream, _stat = container.get_archive(alt)
-                media_path = alt
-                hermes_fallback_found = True
-            except Exception:
-                pass
-        if not hermes_fallback_found:
-            fallback_path = _legacy_script_fallback_path(container, archive_path)
-            if not fallback_path:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Hermes file not found",
-                ) from exc
-            media_path = fallback_path
-            try:
-                stream, _stat = container.get_archive(fallback_path)
-            except DockerNotFound as fallback_exc:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Hermes file not found",
-                ) from fallback_exc
-            except DockerAPIError as fallback_exc:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to read Hermes file",
-                ) from fallback_exc
+        fallback_path = _legacy_script_fallback_path(container, archive_path) or _legacy_profile_fallback_path(archive_path)
+        if not fallback_path:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Hermes file not found",
+            ) from exc
+        media_path = fallback_path
+        try:
+            stream, _stat = container.get_archive(fallback_path)
+        except DockerNotFound as fallback_exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Hermes file not found",
+            ) from fallback_exc
+        except DockerAPIError as fallback_exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to read Hermes file",
+            ) from fallback_exc
     except DockerAPIError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

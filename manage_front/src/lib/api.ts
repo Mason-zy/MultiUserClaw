@@ -134,3 +134,42 @@ export async function getAuditLogs(
   if (action) params.set("action", action);
   return request<PaginatedAuditLogs>(`/api/admin/audit?${params}`);
 }
+
+export interface AdminModelItem {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+}
+
+export interface AdminProviderConfig {
+  id?: string;
+  name: string;
+  providerType: string;
+  baseUrl?: string;
+  apiKey?: string;
+  apiKeyMasked?: string;
+  configured?: boolean;
+  enabled: boolean;
+  isDefault?: boolean;
+  models: AdminModelItem[];
+}
+
+export interface AdminModelsConfig {
+  models: Array<{ id: string; name: string; provider: string; providerName: string }>;
+  configuredModel: string;
+  configuredProviders: Record<string, AdminProviderConfig>;
+}
+
+export async function getModelsConfig(): Promise<AdminModelsConfig> {
+  return request<AdminModelsConfig>("/api/admin/models");
+}
+
+export async function updateModelsConfig(data: {
+  defaultModel?: string;
+  providers?: Record<string, AdminProviderConfig>;
+}): Promise<AdminModelsConfig & { ok: boolean }> {
+  return request<AdminModelsConfig & { ok: boolean }>("/api/admin/models", {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}

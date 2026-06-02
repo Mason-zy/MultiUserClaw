@@ -5,7 +5,7 @@ WORKDIR /app
 
 # Install dependencies first (layer cache)
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm config set registry https://registry.npmmirror.com && npm ci
 
 # Copy source and build
 COPY . .

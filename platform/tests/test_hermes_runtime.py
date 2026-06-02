@@ -394,6 +394,63 @@ async def test_dedicated_hermes_list_skills_reads_container_metadata(monkeypatch
     ]
 
 
+def test_agent_skill_scope_hides_identical_global_copies(monkeypatch):
+    from app.runtime_backends import hermes_skills
+
+    class FakeExecResult:
+        exit_code = 0
+
+        def __init__(self, output):
+            self.output = output
+
+    class FakeContainer:
+        def exec_run(self, cmd):
+            root = cmd[-1]
+            if root == "/opt/data/skills":
+                payload = [
+                    {
+                        "name": "shared-global",
+                        "description": "Available everywhere",
+                        "source": "hermes",
+                        "disabled": False,
+                        "path": "shared-global",
+                        "fingerprint": "same",
+                    }
+                ]
+            else:
+                payload = [
+                    {
+                        "name": "shared-global",
+                        "description": "Copied into the agent profile",
+                        "source": "hermes",
+                        "disabled": False,
+                        "path": "shared-global",
+                        "fingerprint": "same",
+                    },
+                    {
+                        "name": "agent-only",
+                        "description": "Local workflow",
+                        "source": "hermes",
+                        "disabled": False,
+                        "path": "agent-only",
+                        "fingerprint": "different",
+                    },
+                ]
+            return FakeExecResult(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(hermes_skills, "get_docker_container", lambda container_id: FakeContainer())
+
+    payload = hermes_skills.list_skills_from_hermes_container(
+        "container-123",
+        scope="agent",
+        agent_id="programmer",
+    )
+
+    assert [item["name"] for item in payload] == ["agent-only"]
+    assert payload[0]["scope"] == "agent:programmer"
+    assert "fingerprint" not in payload[0]
+
+
 @pytest.mark.asyncio
 async def test_shared_hermes_context_does_not_call_openclaw_agent_api(monkeypatch, shared_user):
     from app.runtime_backends.shared_hermes import SharedHermesBackend
@@ -1689,8 +1746,8 @@ async def test_dedicated_hermes_upload_file_puts_archive_into_container(monkeypa
 
     assert payload["original_name"] == "notes.txt"
     assert payload["size"] == len(b"hello hermes")
-    assert payload["path"].startswith("workspace/uploads/")
-    assert payload["url"].startswith("/api/openclaw/filemanager/serve?path=/workspace/uploads/")
+    assert payload["path"].startswith("profiles/main/workspace/uploads/")
+    assert payload["url"].startswith("/api/openclaw/filemanager/serve?path=/profiles/main/workspace/uploads/")
     assert fake_docker_client.requested_ids == ["docker-123"]
     assert fake_docker_container.exec_calls
     assert "/root/.openclaw" in fake_docker_container.exec_calls[0][-1]
@@ -1703,7 +1760,7 @@ async def test_dedicated_hermes_upload_file_puts_archive_into_container(monkeypa
         uploaded_name = next(
             name
             for name in members
-            if name.startswith("workspace/uploads/") and name.endswith("notes.txt")
+            if name.startswith("profiles/main/workspace/uploads/") and name.endswith("notes.txt")
         )
         assert tar.extractfile(uploaded_name).read() == b"hello hermes"
 
@@ -1908,7 +1965,7 @@ async def test_shared_hermes_upload_file_puts_archive_into_shared_container(monk
     class FakeSharedContext:
         binding = FakeBinding()
         session_prefix = "agent:usr_sharedagent:"
-        upload_dir = "workspace-usr_sharedagent/uploads"
+        upload_dir = "profiles/usr_sharedagent/workspace/uploads"
 
     class FakeDockerContainer:
         def __init__(self):
@@ -1960,7 +2017,7 @@ async def test_shared_hermes_upload_file_puts_archive_into_shared_container(monk
 
     assert payload["original_name"] == "shared.txt"
     assert payload["size"] == len(b"shared hermes")
-    assert payload["path"].startswith("workspace-usr_sharedagent/uploads/")
+    assert payload["path"].startswith("profiles/usr_sharedagent/workspace/uploads/")
     assert fake_docker_client.requested_ids == ["openclaw-shared"]
     assert fake_docker_container.exec_calls
     assert "/root/.openclaw" in fake_docker_container.exec_calls[0][-1]
@@ -1973,7 +2030,7 @@ async def test_shared_hermes_upload_file_puts_archive_into_shared_container(monk
         uploaded_name = next(
             name
             for name in members
-            if name.startswith("workspace-usr_sharedagent/uploads/") and name.endswith("shared.txt")
+            if name.startswith("profiles/usr_sharedagent/workspace/uploads/") and name.endswith("shared.txt")
         )
         assert tar.extractfile(uploaded_name).read() == b"shared hermes"
 
@@ -2356,7 +2413,7 @@ async def test_proxy_file_request_maps_workspace_paths_for_dedicated_hermes(monk
 
     assert response.body == b"hello"
     assert fake_docker_client.requested_ids == ["docker-123"]
-    assert fake_docker_container.paths == ["/opt/data/workspace/uploads/test.txt"]
+    assert fake_docker_container.paths == ["/opt/data/profiles/main/workspace/uploads/test.txt"]
     assert captured == []
 
 
