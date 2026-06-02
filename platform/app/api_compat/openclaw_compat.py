@@ -151,7 +151,7 @@ async def list_dedicated_agents(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.get_agent_info(RuntimeContext(user=user))
+    return await backend.get_agent_info(RuntimeContext(user=user, scope="dedicated"))
 
 
 @router.post("/api/openclaw/agents")
@@ -257,7 +257,7 @@ async def list_dedicated_skills(
             container = await ensure_running(db, user.id)
         if all and not scope:
             skills = list_skills_from_hermes_container(container.docker_id, scope="global")
-            info = await backend.get_agent_info(RuntimeContext(user=user))
+            info = await backend.get_agent_info(RuntimeContext(user=user, scope="dedicated"))
             agents = info.get("agents") if isinstance(info, dict) else []
             agent_ids = [str(item.get("id")) for item in agents if isinstance(item, dict) and item.get("id")]
             for resolved_agent_id in agent_ids:
@@ -270,7 +270,7 @@ async def list_dedicated_skills(
                 )
             return skills
         return list_skills_from_hermes_container(container.docker_id, scope=scope, agent_id=agentId)
-    return await backend.list_skills(RuntimeContext(user=user))
+    return await backend.list_skills(RuntimeContext(user=user, scope="dedicated"))
 
 
 @router.get("/api/openclaw/skills/scopes")
@@ -278,7 +278,7 @@ async def list_dedicated_skill_scopes(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    info = await backend.get_agent_info(RuntimeContext(user=user))
+    info = await backend.get_agent_info(RuntimeContext(user=user, scope="dedicated"))
     agents = info.get("agents") if isinstance(info, dict) else []
     agent_ids = [str(item.get("id")) for item in agents if isinstance(item, dict) and item.get("id")]
     return skill_scopes(agent_ids)
@@ -494,7 +494,7 @@ async def prewarm_dedicated_runtime(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.prewarm(RuntimeContext(user=user))
+    return await backend.prewarm(RuntimeContext(user=user, scope="dedicated"))
 
 
 @router.get("/api/openclaw/sessions")
@@ -502,7 +502,7 @@ async def list_dedicated_sessions(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.list_sessions(RuntimeContext(user=user))
+    return await backend.list_sessions(RuntimeContext(user=user, scope="dedicated"))
 
 
 @router.get("/api/openclaw/sessions/{session_key:path}")
@@ -511,7 +511,7 @@ async def get_dedicated_session(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.get_session(RuntimeContext(user=user), session_key)
+    return await backend.get_session(RuntimeContext(user=user, scope="dedicated"), session_key)
 
 
 @router.post("/api/openclaw/sessions/{session_key:path}/title-summary")
@@ -523,7 +523,7 @@ async def summarize_dedicated_session_title(
     title = _fallback_title(req.message)
     backend = get_runtime_backend()
     if title:
-        await backend.rename_session(RuntimeContext(user=user), session_key, title)
+        await backend.rename_session(RuntimeContext(user=user, scope="dedicated"), session_key, title)
     return {"ok": True, "key": session_key, "title": title}
 
 
@@ -534,7 +534,7 @@ async def send_dedicated_message(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    result = await backend.send_message(RuntimeContext(user=user), session_key, req.message, req.model)
+    result = await backend.send_message(RuntimeContext(user=user, scope="dedicated"), session_key, req.message, req.model)
     if isinstance(result, dict) and not result.get("title"):
         result["title"] = _fallback_title(req.message)
     return result
@@ -547,7 +547,7 @@ async def wait_dedicated_run(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.wait_run(RuntimeContext(user=user), run_id, timeout_ms)
+    return await backend.wait_run(RuntimeContext(user=user, scope="dedicated"), run_id, timeout_ms)
 
 
 @router.get("/api/openclaw/runs/{run_id}/events")
@@ -558,7 +558,7 @@ async def dedicated_run_events_stream(
 ):
     user = User(id="", username="", email="", password_hash="")
     backend = get_runtime_backend()
-    return await backend.stream_run_events(RuntimeContext(user=user), request, token, run_id)
+    return await backend.stream_run_events(RuntimeContext(user=user, scope="dedicated"), request, token, run_id)
 
 
 @router.put("/api/openclaw/sessions/{session_key:path}/title")
@@ -568,7 +568,7 @@ async def rename_dedicated_session(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.rename_session(RuntimeContext(user=user), session_key, req.title)
+    return await backend.rename_session(RuntimeContext(user=user, scope="dedicated"), session_key, req.title)
 
 
 @router.delete("/api/openclaw/sessions/{session_key:path}")
@@ -577,7 +577,7 @@ async def delete_dedicated_session(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.delete_session(RuntimeContext(user=user), session_key)
+    return await backend.delete_session(RuntimeContext(user=user, scope="dedicated"), session_key)
 
 
 class AbortRunRequest(BaseModel):
@@ -592,7 +592,7 @@ async def abort_dedicated_run(
 ):
     backend = get_runtime_backend()
     session_key = req.sessionKey if req else ""
-    return await backend.abort_run(RuntimeContext(user=user), run_id, session_key)
+    return await backend.abort_run(RuntimeContext(user=user, scope="dedicated"), run_id, session_key)
 
 
 @router.post("/api/openclaw/runs/{run_id}/approval")
@@ -603,7 +603,7 @@ async def respond_dedicated_run_approval(
 ):
     backend = get_runtime_backend()
     return await backend.respond_run_approval(
-        RuntimeContext(user=user),
+        RuntimeContext(user=user, scope="dedicated"),
         run_id,
         req.choice,
         resolve_all=req.resolveAll,
@@ -616,7 +616,7 @@ async def abort_dedicated_active_session(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.abort_active_session(RuntimeContext(user=user), session_key)
+    return await backend.abort_active_session(RuntimeContext(user=user, scope="dedicated"), session_key)
 
 
 @router.get("/api/openclaw/commands")
@@ -625,7 +625,7 @@ async def list_dedicated_commands(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
-    return await backend.list_commands(RuntimeContext(user=user), agentId)
+    return await backend.list_commands(RuntimeContext(user=user, scope="dedicated"), agentId)
 
 
 @router.get("/api/openclaw/knowledge/list")
@@ -690,7 +690,7 @@ async def upload_dedicated_file(
 ):
     backend = get_runtime_backend()
     return await backend.upload_file(
-        RuntimeContext(user=user),
+        RuntimeContext(user=user, scope="dedicated"),
         file,
         target_dir=normalize_hermes_filemanager_path(path or upload_dir),
     )
@@ -744,4 +744,4 @@ async def dedicated_events_stream(
     # user is recovered inside backend from token for EventSource compatibility
     user = User(id="", username="", email="", password_hash="")
     backend = get_runtime_backend()
-    return await backend.stream_events(RuntimeContext(user=user), request, token)
+    return await backend.stream_events(RuntimeContext(user=user, scope="dedicated"), request, token)

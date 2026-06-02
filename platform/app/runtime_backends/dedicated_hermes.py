@@ -346,7 +346,6 @@ class DedicatedHermesBackend:
             scope=RUNTIME_SCOPE,
             runtime_mode=RUNTIME_SCOPE,
         )
-        )
 
     async def list_skills(self, ctx: RuntimeContext) -> list[dict]:
         async with async_session() as db:
