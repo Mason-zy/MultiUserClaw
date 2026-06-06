@@ -496,6 +496,9 @@ async def container_doctor_fix(
     if container is None:
         raise HTTPException(status_code=404, detail="No container found")
 
+    if _dedicated_runtime_backend() == "hermes":
+        raise HTTPException(status_code=400, detail="doctor-fix is not supported for Hermes runtime")
+
     short_id = user.id[:8]
     volume_prefix = settings.dedicated_runtime_data_volume_prefix
     volume_name = f"{volume_prefix}-{short_id}"

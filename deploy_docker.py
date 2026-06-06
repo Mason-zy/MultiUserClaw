@@ -526,7 +526,6 @@ def main():
         # 同步 deploy_copy
         sync_deploy_copy_to_bridge()
         sync_deploy_copy_to_hermes()
-        sync_deploy_copy_to_platform()
 
         if "openclaw" in services:
             warn("当前 hermes 分支默认不再重建 openclaw 基础镜像，已忽略 openclaw 关键字")

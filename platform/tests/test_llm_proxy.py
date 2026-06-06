@@ -65,6 +65,7 @@ async def test_proxy_injects_platform_default_reasoning_effort(monkeypatch):
         "_resolve_provider",
         lambda _model: ("openai/gpt-5.4", "openai-key", None, None),
     )
+    monkeypatch.setattr(service, "_litellm_model_supports_param", lambda *args: True)
 
     async def fake_acompletion(**kwargs):
         captured_kwargs.update(kwargs)
@@ -166,6 +167,7 @@ async def test_proxy_keeps_explicit_request_reasoning_effort(monkeypatch):
         "_resolve_provider",
         lambda _model: ("openai/gpt-5.4", "openai-key", None, None),
     )
+    monkeypatch.setattr(service, "_litellm_model_supports_param", lambda *args: True)
 
     async def fake_acompletion(**kwargs):
         captured_kwargs.update(kwargs)

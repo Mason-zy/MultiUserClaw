@@ -11,7 +11,7 @@ RUN sed -i \
         -e "s|http://deb.debian.org/debian-security|${APT_SECURITY_MIRROR}|g" \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Retries=5 update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} uv
@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} uv
 COPY pyproject.toml ./
 
 # Install dependencies
-RUN uv pip install --system --no-cache -r pyproject.toml
+RUN uv pip install --system --no-cache -r pyproject.toml --default-index https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Copy application code
 COPY app/ app/

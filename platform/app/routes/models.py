@@ -174,7 +174,10 @@ async def update_models_config(
             p for p in existing_providers
             if isinstance(p, dict) and p.get("name") == "platform-gateway"
         ]
-        new_providers = _frontend_to_hermes_providers(body.providers)
+        new_providers = [
+            p for p in _frontend_to_hermes_providers(body.providers)
+            if p.get("name") != "platform"
+        ]
         config["custom_providers"] = platform_gateway + new_providers
 
     if body.defaultModel is not None:

@@ -107,7 +107,7 @@ export default function AIModels() {
     setSaving(true)
     setError('')
     try {
-      const fullId = `${provider}/${modelId}`
+      const fullId = provider === 'platform' ? modelId : `${provider}/${modelId}`
       await updateModelsConfig({ defaultModel: fullId })
       setConfiguredModel(fullId)
       flash(`默认模型已设置为 ${fullId}`)
@@ -327,7 +327,7 @@ export default function AIModels() {
                 {models.length > 0 && (
                   <div className="border-t border-dark-border">
                     {models.map((model, i) => {
-                      const fullId = `${name}/${model.id}`
+                      const fullId = name === 'platform' ? model.id : `${name}/${model.id}`
                       const isDefault = configuredModel === fullId
                       return (
                         <div

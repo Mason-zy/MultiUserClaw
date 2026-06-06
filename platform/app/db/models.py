@@ -57,6 +57,18 @@ class Container(Base):
     last_active_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class RuntimeRun(Base):
+    """Tracks runtime run ownership for access control."""
+
+    __tablename__ = "runtime_runs"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    session_key: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    runtime_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="dedicated")
+    backend: Mapped[str] = mapped_column(String(32), nullable=False, default="hermes")
+
+
 class UserPortBinding(Base):
     """Per-user persisted host port preferences for recreated containers."""
 

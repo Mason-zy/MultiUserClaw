@@ -193,11 +193,17 @@ def _resolve_provider(model: str) -> tuple[str, str, str | None, dict[str, str] 
                 logger.info("模型路由: %s → %s (keyword=%r, litellm=%s)", model, provider["prefix"], keyword, litellm_model)
                 return litellm_model, api_key, api_base, extra_headers
 
-    # 3. Fallback: vLLM
+    # 3. Fallback: use the platform's default model
+    default_model = (settings.default_model or "").strip()
+    if default_model and default_model != model:
+        logger.info("模型路由: %s → 默认模型 %s", model, default_model)
+        return _resolve_provider(default_model)
+
+    # 4. Fallback: vLLM
     if settings.hosted_vllm_api_base:
         return f"hosted_vllm/{model}", settings.hosted_vllm_api_key or "dummy", settings.hosted_vllm_api_base, None
 
-    # 4. Fallback: OpenRouter
+    # 5. Fallback: OpenRouter
     if settings.openrouter_api_key:
         return f"openrouter/{model}", settings.openrouter_api_key, None, None
 
@@ -754,6 +760,19 @@ async def proxy_chat_completion(
                             output_tokens=total_output,
                             stream=True,
                         )
+                        await write_audit_log(
+                            db,
+                            action="llm_call",
+                            user_id=user.id,
+                            resource=model,
+                            detail={
+                                "stream": True,
+                                "input_tokens": total_input,
+                                "output_tokens": total_output,
+                                "total_tokens": total,
+                            },
+                        )
+                        await db.commit()
                     except Exception as e:
                         logger.warning("Failed to record streaming usage: %s", e)
 
@@ -772,6 +791,19 @@ async def proxy_chat_completion(
             output_tokens=usage.completion_tokens or 0,
             stream=False,
         )
+        await write_audit_log(
+            db,
+            action="llm_call",
+            user_id=user.id,
+            resource=model,
+            detail={
+                "stream": False,
+                "input_tokens": usage.prompt_tokens or 0,
+                "output_tokens": usage.completion_tokens or 0,
+                "total_tokens": usage.total_tokens or 0,
+            },
+        )
+        await db.commit()
 
     # 7. Update container last_active_at
     if container is not None:

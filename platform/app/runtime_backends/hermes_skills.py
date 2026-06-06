@@ -838,3 +838,9 @@ print(json.dumps({"path": target}, ensure_ascii=False))
             rel = member.name.split("/", 1)[-1] if "/" in member.name else member.name
             zf.writestr(f"{skill}/{rel}", extracted.read())
     return zip_buffer.getvalue(), mimetypes.types_map.get(".zip", "application/zip")
+
+
+def download_skill_from_hermes_container(container_id_or_name: str | None, skill_name: str, scope: str | None = None, agent_id: str | None = None) -> bytes:
+    """Download a skill from a Hermes container as a zip archive (bytes)."""
+    data, _ = skill_zip_from_hermes_container(container_id_or_name, skill_name, scope, agent_id)
+    return data

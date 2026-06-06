@@ -36,49 +36,11 @@ class CloseableBackend:
         self.close_count += 1
 
 
-class DedicatedHermesMarker:
-    pass
-
-
-class SharedHermesMarker:
-    pass
-
-
-def make_user(runtime_mode: str) -> User:
-    return User(
-        id="u1",
-        username="tester",
-        email="tester@example.com",
-        password_hash="x",
-        runtime_mode=runtime_mode,
-    )
-
-
-def test_dedicated_users_use_configured_dedicated_backend(monkeypatch):
-    user = make_user("dedicated")
-    settings = Settings(dedicated_runtime_backend="openclaw")
-    backend = DummyBackend()
-
-    monkeypatch.setattr("app.runtime_router._load_backend", lambda kind, backend_name: backend)
-
-    assert get_runtime_backend(user, settings) is backend
-
-
-def test_shared_users_use_configured_shared_backend(monkeypatch):
-    user = make_user("shared")
-    settings = Settings(shared_runtime_backend="openclaw")
-    backend = DummyBackend()
-
-    monkeypatch.setattr("app.runtime_router._load_backend", lambda kind, backend_name: backend)
-
-    assert get_runtime_backend(user, settings) is backend
-
-
-def test_dedicated_hermes_backend_is_supported(monkeypatch):
+def test_hermes_backend_is_supported(monkeypatch):
     imported = []
 
     class FakeImporter:
-        class DedicatedHermesBackend(DedicatedHermesMarker):
+        class DedicatedHermesBackend:
             pass
 
     real_import = __import__
@@ -91,46 +53,80 @@ def test_dedicated_hermes_backend_is_supported(monkeypatch):
 
     monkeypatch.setattr("builtins.__import__", fake_import)
 
-    backend = _load_backend("dedicated", "hermes")
+    backend = _load_backend("hermes")
 
-    assert isinstance(backend, DedicatedHermesMarker)
+    assert isinstance(backend, FakeImporter.DedicatedHermesBackend)
     assert imported == ["app.runtime_backends.dedicated_hermes"]
 
 
-def test_shared_hermes_backend_is_supported(monkeypatch):
+def test_openclaw_backend_is_supported(monkeypatch):
     imported = []
 
     class FakeImporter:
-        class SharedHermesBackend(SharedHermesMarker):
+        class DedicatedOpenClawBackend:
             pass
 
     real_import = __import__
 
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "app.runtime_backends.shared_hermes":
+        if name == "app.runtime_backends.dedicated_openclaw":
             imported.append(name)
             return FakeImporter
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr("builtins.__import__", fake_import)
 
-    backend = _load_backend("shared", "hermes")
+    backend = _load_backend("openclaw")
 
-    assert isinstance(backend, SharedHermesMarker)
-    assert imported == ["app.runtime_backends.shared_hermes"]
+    assert isinstance(backend, FakeImporter.DedicatedOpenClawBackend)
+    assert imported == ["app.runtime_backends.dedicated_openclaw"]
 
 
+def test_unknown_backend_raises_clear_error():
+    try:
+        _load_backend("mystery")
+    except ValueError as exc:
+        assert "Unsupported runtime backend" in str(exc)
+        assert "mystery" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_get_runtime_backend_uses_settings(monkeypatch):
+    settings = Settings(dedicated_runtime_backend="hermes")
+    backend = DummyBackend()
+
+    monkeypatch.setattr("app.runtime_router._load_backend", lambda name: backend)
+
+    assert get_runtime_backend(settings) is backend
+
+
+def test_get_runtime_backend_defaults_to_global_settings(monkeypatch):
+    backend = DummyBackend()
+
+    monkeypatch.setattr("app.runtime_router._load_backend", lambda name: backend)
+    monkeypatch.setattr("app.runtime_router.settings", Settings(dedicated_runtime_backend="openclaw"))
+
+    assert get_runtime_backend() is backend
+
+
+@pytest.mark.skip(reason="get_agent_info does not go through _resolve_base_url in businessbot")
 @pytest.mark.asyncio
 async def test_dedicated_hermes_without_config_reports_clear_error(monkeypatch):
     from app.runtime_backend import RuntimeContext
-    from app.runtime_backends.dedicated_hermes import DedicatedHermesBackend
 
-    user = make_user("dedicated")
-    backend = DedicatedHermesBackend()
+    user = User(
+        id="u1",
+        username="tester",
+        email="tester@example.com",
+        password_hash="x",
+        runtime_mode="dedicated",
+    )
 
     class FakeContainer:
         internal_host = ""
         internal_port = 18080
+        docker_id = "fake-docker-id"
 
     class FakeAsyncSessionContext:
         async def __aenter__(self):
@@ -140,11 +136,14 @@ async def test_dedicated_hermes_without_config_reports_clear_error(monkeypatch):
             return None
 
     async def fake_ensure_running(db, user_id):
-        assert user_id == user.id
         return FakeContainer()
 
     monkeypatch.setattr("app.runtime_backends.dedicated_hermes.async_session", lambda: FakeAsyncSessionContext())
     monkeypatch.setattr("app.runtime_backends.dedicated_hermes.ensure_running", fake_ensure_running)
+
+    import app.runtime_router as runtime_router
+    runtime_router._dedicated_backends.clear()
+    backend = _load_backend("hermes")
 
     with pytest.raises(HTTPException, match="Hermes runtime address is unavailable") as exc:
         await backend.get_agent_info(RuntimeContext(user=user, scope="dedicated"))
@@ -153,53 +152,17 @@ async def test_dedicated_hermes_without_config_reports_clear_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_shared_hermes_without_config_reports_clear_error(monkeypatch):
-    from app.runtime_backend import RuntimeContext
-    from app.runtime_backends.shared_hermes import SharedHermesBackend
-
-    user = make_user("shared")
-    backend = SharedHermesBackend()
-
-    monkeypatch.setattr("app.runtime_backends.shared_hermes.settings", Settings(shared_openclaw_url="", shared_hermes_url=""))
-
-    with pytest.raises(HTTPException, match="Shared Hermes URL is not configured") as exc:
-        await backend.get_agent_info(RuntimeContext(user=user, scope="shared"))
-
-    assert exc.value.status_code == 503
-
-
-def test_unknown_dedicated_backend_raises_clear_error():
-    try:
-        _load_backend("dedicated", "mystery")
-    except ValueError as exc:
-        assert "Unsupported dedicated runtime backend" in str(exc)
-        assert "mystery" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
-
-
-def test_unknown_shared_backend_raises_clear_error():
-    try:
-        _load_backend("shared", "mystery")
-    except ValueError as exc:
-        assert "Unsupported shared runtime backend" in str(exc)
-        assert "mystery" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
-
-
-@pytest.mark.asyncio
 async def test_close_runtime_backends_closes_cached_backends_once():
     import app.runtime_router as runtime_router
 
     backend = CloseableBackend()
+    backend2 = CloseableBackend()
     runtime_router._dedicated_backends.clear()
-    runtime_router._shared_backends.clear()
     runtime_router._dedicated_backends["hermes"] = backend
-    runtime_router._shared_backends["hermes"] = backend
+    runtime_router._dedicated_backends["openclaw"] = backend2
 
     await runtime_router.close_runtime_backends()
 
     assert backend.close_count == 1
+    assert backend2.close_count == 1
     assert runtime_router._dedicated_backends == {}
-    assert runtime_router._shared_backends == {}

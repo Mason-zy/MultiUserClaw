@@ -53,7 +53,8 @@ def test_list_users_with_search():
     assert "items" in result
     assert result["total"] >= 1
     usernames = [u["username"] for u in result["items"]]
-    assert "admin" in usernames
+    # All returned usernames should contain the search term (case-insensitive)
+    assert all(ADMIN_USERNAME.lower() in u.lower() for u in usernames)
 
 
 def test_list_users_pagination():

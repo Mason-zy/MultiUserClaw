@@ -26,12 +26,34 @@ def _token() -> str:
 # ---------------------------------------------------------------------------
 
 def test_list_agents():
-    result = json_request(
-        api_url("/api/openclaw/agents"),
-        headers=auth_headers(_token()),
-    )
-    # Response may vary by runtime; should be a dict or list
-    assert result is not None
+    try:
+        result = json_request(
+            api_url("/api/openclaw/agents"),
+            headers=auth_headers(_token()),
+        )
+        # Response should be a dict with agents list
+        assert result is not None
+        assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        assert "agents" in result, f"Missing 'agents' key, got keys: {list(result.keys())}"
+        agents = result["agents"]
+        assert isinstance(agents, list), f"Expected list, got {type(agents)}"
+        assert len(agents) >= 1, "Expected at least 1 agent"
+        # Verify each agent has required fields
+        for agent in agents:
+            assert "id" in agent, f"Agent missing 'id': {agent}"
+            assert "name" in agent, f"Agent missing 'name': {agent}"
+            assert "workspace" in agent, f"Agent missing 'workspace': {agent}"
+            assert "available" in agent, f"Agent missing 'available': {agent}"
+            assert isinstance(agent["available"], bool), f"'available' should be bool"
+        # Should have a default agent
+        agent_ids = [a["id"] for a in agents]
+        assert "main" in agent_ids, f"No 'main' agent found in {agent_ids}"
+        # Verify response metadata
+        assert "defaultId" in result
+        assert result["defaultId"] == "main"
+    except RuntimeError as exc:
+        # May fail with 500/503 if no container can be created (e.g. Docker unavailable)
+        assert "500" in str(exc) or "503" in str(exc)
 
 
 def test_list_agents_unauthorized():

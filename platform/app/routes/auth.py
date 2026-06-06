@@ -147,7 +147,7 @@ async def get_me(user: User = Depends(get_current_user)):
         email=user.email,
         role=user.role,
         quota_tier=user.quota_tier,
-        runtime_mode="dedicated",
+        runtime_mode=user.runtime_mode,
         is_active=user.is_active,
     )
 

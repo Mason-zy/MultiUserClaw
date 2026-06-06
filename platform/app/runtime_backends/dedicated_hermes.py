@@ -26,6 +26,7 @@ from app.runtime_backends.hermes_knowledge import build_knowledge_context
 from app.runtime_backends.hermes_agents import (
     agent_id_from_session_key,
     agent_identity_prompt_from_hermes_container,
+    build_agent_info,
     list_agent_profiles_from_hermes_container,
     model_for_session_key,
 )
@@ -338,13 +339,14 @@ class DedicatedHermesBackend:
             "readonly": True,
         }
 
-    async def get_agent_info(self, ctx: RuntimeContext) -> dict:
-        async with async_session() as db:
-            container = await ensure_running(db, ctx.user.id)
-        return list_agent_profiles_from_hermes_container(
-            container.docker_id,
-            scope=RUNTIME_SCOPE,
-            runtime_mode=RUNTIME_SCOPE,
+    async def get_agent_info(self, ctx: RuntimeContext, container_agents: list[dict] | None = None) -> dict:
+        payload = await (await self._client(ctx)).get_models()
+        models = payload.get("data") if isinstance(payload, dict) else []
+        return build_agent_info(
+            models if isinstance(models, list) else [],
+            scope=ctx.scope,
+            runtime_mode=ctx.user.runtime_mode,
+            container_agents=container_agents,
         )
 
     async def list_skills(self, ctx: RuntimeContext) -> list[dict]:

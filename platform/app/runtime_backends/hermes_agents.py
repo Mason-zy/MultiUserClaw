@@ -15,6 +15,7 @@ from app.container.manager import get_docker_container
 DEFAULT_HERMES_MODEL = "hermes-agent"
 SYSTEM_AGENT_IDS = {"main", "manager", "programmer", "researcher", "hr", "doctor"}
 HERMES_PROFILES_ROOT = "/opt/data/profiles"
+CONTAINER_PROFILES_DIR = "/opt/data/profiles"
 HERMES_PROFILE_GATEWAY_BASE_PORT = 19080
 
 _SESSION_AGENT_RE = re.compile(r"^agent:([^:]+):")

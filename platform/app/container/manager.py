@@ -423,7 +423,16 @@ def _write_hermes_runtime_files(container: docker.models.containers.Container) -
     existing_config = _read_existing_hermes_config(container)
 
     if existing_config.get("custom_providers"):
-        platform_config["custom_providers"] = existing_config["custom_providers"]
+        user_providers = [
+            p for p in existing_config["custom_providers"]
+            if isinstance(p, dict) and p.get("name") not in ("platform-gateway", "platform")
+        ]
+        if user_providers:
+            gateway = [
+                p for p in platform_config.get("custom_providers", [])
+                if isinstance(p, dict) and p.get("name") == "platform-gateway"
+            ]
+            platform_config["custom_providers"] = gateway + user_providers
     if (existing_config.get("model") or {}).get("default"):
         platform_config.setdefault("model", {})["default"] = existing_config["model"]["default"]
 
