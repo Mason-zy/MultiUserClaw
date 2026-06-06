@@ -206,6 +206,10 @@ async def update_models_config(
             # Remove platform-gateway's base_url override so the
             # custom_provider's own base_url takes effect.
             config["model"].pop("base_url", None)
+            # Strip provider prefix from default model so the hermes agent
+            # sends the actual model name (e.g. "kimi-k2.5") not the fully
+            # qualified "kimi/kimi-k2.5" which it doesn't parse.
+            config["model"]["default"] = body.defaultModel.split("/", 1)[1]
         else:
             config["model"]["provider"] = "platform-gateway"
 

@@ -143,7 +143,10 @@ async def test_default_model_routes_to_user_provider(monkeypatch):
     assert model.get("provider") == "deepseek", (
         f"Expected provider=deepseek, got {model.get('provider')}"
     )
-    assert model.get("default") == "deepseek/deepseek-chat"
+    # Provider prefix must be stripped from model.default when using a
+    # user-provided provider, so the hermes agent sends the actual model
+    # name (e.g. "deepseek-chat") not the fully qualified form.
+    assert model.get("default") == "deepseek-chat"
     # base_url override must be removed so the custom_provider's own base_url is used
     assert "base_url" not in model
 
@@ -295,7 +298,7 @@ def test_write_runtime_files_preserves_user_provider(monkeypatch):
     monkeypatch.setattr(mgr, "_build_hermes_env_file", lambda: "")
 
     existing_config = {
-        "model": {"provider": "deepseek", "default": "deepseek/deepseek-chat"},
+        "model": {"provider": "deepseek", "default": "deepseek-chat"},
         "custom_providers": [
             {"name": "platform-gateway", "base_url": "http://gw:8080/llm/v1", "api_key": "proxy-key"},
             {"name": "deepseek", "base_url": "https://api.deepseek.com", "api_key": "sk-xxx"},
@@ -320,7 +323,8 @@ def test_write_runtime_files_preserves_user_provider(monkeypatch):
     assert model.get("provider") == "deepseek", (
         f"Expected provider=deepseek, got {model.get('provider')}"
     )
-    assert model.get("default") == "deepseek/deepseek-chat"
+    # model.default should already be stripped of prefix (from update_models_config)
+    assert model.get("default") == "deepseek-chat"
     assert "base_url" not in model
     # User's custom_providers should be preserved
     provider_names = [p["name"] for p in written.get("custom_providers", [])]

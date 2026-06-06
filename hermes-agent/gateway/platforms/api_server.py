@@ -848,7 +848,12 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
-        if model_override:
+        # Don't let the sentinel default "hermes-agent" override a
+        # user-configured model from config.yaml.  When the platform
+        # (or any API client) passes the advertised model name without
+        # specifying a different one, treat it as "use whatever is
+        # configured" rather than a hard override.
+        if model_override and model_override != self._model_name:
             model = model_override
 
         user_config = _load_gateway_config()
