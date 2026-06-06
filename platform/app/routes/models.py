@@ -185,6 +185,30 @@ async def update_models_config(
             config["model"] = {}
         config["model"]["default"] = body.defaultModel
 
+        # Resolve model.provider so the hermes agent routes to the correct
+        # custom_provider instead of blindly using platform-gateway for everything.
+        # e.g. "deepseek/deepseek-chat" → provider="deepseek"
+        if "/" in body.defaultModel:
+            provider_hint = body.defaultModel.split("/", 1)[0]
+        else:
+            provider_hint = ""
+
+        custom_providers = config.get("custom_providers") or []
+        matching = None
+        if provider_hint:
+            for cp in custom_providers:
+                if isinstance(cp, dict) and cp.get("name") == provider_hint:
+                    matching = cp
+                    break
+
+        if matching and (matching.get("api_key") or "").strip():
+            config["model"]["provider"] = provider_hint
+            # Remove platform-gateway's base_url override so the
+            # custom_provider's own base_url takes effect.
+            config["model"].pop("base_url", None)
+        else:
+            config["model"]["provider"] = "platform-gateway"
+
     try:
         _write_container_config(container_name, config)
     except Exception as e:

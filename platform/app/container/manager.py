@@ -435,6 +435,13 @@ def _write_hermes_runtime_files(container: docker.models.containers.Container) -
             platform_config["custom_providers"] = gateway + user_providers
     if (existing_config.get("model") or {}).get("default"):
         platform_config.setdefault("model", {})["default"] = existing_config["model"]["default"]
+    # Preserve user's model.provider (e.g. "deepseek") so user-added
+    # custom_providers with their own API keys are routed directly rather
+    # than being forced through platform-gateway on container restart.
+    existing_provider = (existing_config.get("model") or {}).get("provider", "")
+    if existing_provider and existing_provider != "platform-gateway":
+        platform_config.setdefault("model", {})["provider"] = existing_provider
+        platform_config["model"].pop("base_url", None)
 
     config_content = yaml.safe_dump(platform_config, allow_unicode=True, sort_keys=False).encode("utf-8")
     env_content = _build_hermes_env_file().encode("utf-8")

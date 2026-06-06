@@ -261,11 +261,16 @@ config['custom_providers'] = [
 # Add the new entry
 config['custom_providers'].append(custom_provider_entry)
 
-# Ensure model section exists and set provider
-if 'model' not in config:
-    config['model'] = {}
-
-config['model']['provider'] = 'platform-gateway'
+# Ensure model section exists and set provider.
+# Only default to platform-gateway when no user-defined provider is already
+# configured — otherwise user-added custom_providers (e.g. deepseek) with
+# their own API keys would be ignored and all traffic would still go through
+# the platform proxy.
+existing_provider = (config.get('model') or {}).get('provider', '') if config.get('model') else ''
+if not existing_provider or existing_provider in ('platform-gateway', 'custom'):
+    config['model']['provider'] = 'platform-gateway'
+else:
+    print(f"✓ Preserving user-defined model.provider: {existing_provider}")
 
 # Set default model if specified
 if default_model:
