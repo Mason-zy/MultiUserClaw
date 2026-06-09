@@ -89,6 +89,14 @@ PROVIDER_PRESETS: dict[str, ProviderPreset] = {
         models=(("doubao-seed-1-6", "Doubao Seed 1.6"),),
         key_attr="doubao_api_key",
     ),
+    "evolink": ProviderPreset(
+        id="evolink",
+        name="Evolink",
+        provider_type="evolink",
+        api_base="https://direct.evolink.ai/v1",
+        models=(("gpt-5.2", "GPT-5.2"), ("deepseek-chat", "DeepSeek V4"), ("deepseek-reasoner", "DeepSeek Reasoner")),
+        key_attr="evolink_api_key",
+    ),
 }
 
 

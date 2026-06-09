@@ -104,6 +104,13 @@ _PROVIDERS: list[dict] = [
         "keywords": ["aihubmix"],
     },
     {
+        "prefix": "evolink",
+        "key_attr": "evolink_api_key",
+        "litellm_fmt": "openai/{model}",
+        "api_base": "https://direct.evolink.ai/v1",
+        "keywords": ["evolink"],
+    },
+    {
         "prefix": "vllm",
         "key_attr": "hosted_vllm_api_key",
         "litellm_fmt": "hosted_vllm/{model}",
@@ -232,7 +239,7 @@ def _resolve_configured_provider(provider: ModelProviderConfig, model_id: str) -
     elif provider_type == "openrouter":
         litellm_model = f"openrouter/{model_id}"
         api_base = None
-    elif provider_type in {"kimi", "moonshot", "zhipu", "doubao", "dashscope", "aihubmix", "custom"}:
+    elif provider_type in {"kimi", "moonshot", "zhipu", "doubao", "dashscope", "aihubmix", "evolink", "custom"}:
         litellm_model = f"openai/{model_id}"
     elif provider_type == "vllm":
         litellm_model = f"hosted_vllm/{model_id}"
