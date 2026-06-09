@@ -37,6 +37,7 @@ def test_unconfigured_explicit_provider_fails_as_non_retryable_client_error(monk
         "dashscope_api_key",
         "minimax_api_key",
         "aihubmix_api_key",
+        "evolink_api_key",
         "moonshot_api_key",
         "kimi_api_key",
         "zhipu_api_key",

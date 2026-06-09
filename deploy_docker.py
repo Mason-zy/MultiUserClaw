@@ -158,6 +158,7 @@ def check_env_file():
         "OPENROUTER_API_KEY",
         "DASHSCOPE_API_KEY",
         "AIHUBMIX_API_KEY",
+        "EVOLINK_API_KEY",
         "MOONSHOT_API_KEY",
         "ZHIPU_API_KEY",
         "HOSTED_VLLM_API_KEY",
