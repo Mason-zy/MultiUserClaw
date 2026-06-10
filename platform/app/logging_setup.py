@@ -76,6 +76,7 @@ def log_settings_summary() -> None:
         "kimi": settings.kimi_api_key,
         "moonshot": settings.moonshot_api_key,
         "aihubmix": settings.aihubmix_api_key,
+        "evolink": settings.evolink_api_key,
         "openrouter": settings.openrouter_api_key,
         "zhipu": settings.zhipu_api_key,
     }

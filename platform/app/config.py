@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     minimax_api_base: str = "https://api.minimax.io/v1"
     minimax_m27_use_highspeed: bool = True
     aihubmix_api_key: str = ""
+    evolink_api_key: str = ""
     moonshot_api_key: str = ""
     kimi_api_key: str = ""
     zhipu_api_key: str = ""
