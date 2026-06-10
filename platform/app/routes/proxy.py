@@ -14,7 +14,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import docker
 import httpx
@@ -40,6 +40,40 @@ from app.runtime_backends.hermes_files import normalize_hermes_filemanager_path,
 
 logger = logging.getLogger("platform.routes.proxy")
 router = APIRouter(prefix="/api/openclaw", tags=["proxy"])
+
+
+def _safe_content_disposition(filename: str) -> str:
+    """Build a Content-Disposition header value safe for non-ASCII filenames.
+
+    Uses RFC 5987 ``filename*=UTF-8''...`` encoding so Chinese and other
+    non-latin-1 characters survive HTTP header encoding.
+    """
+    encoded = quote(filename, safe="")
+    return f"attachment; filename*=UTF-8''{encoded}"
+
+
+def _sanitize_content_disposition(value: str) -> str:
+    """Re-encode a Content-Disposition header value to be latin-1 safe."""
+    # If the value is already pure ASCII, return as-is
+    try:
+        value.encode("latin-1")
+        return value
+    except UnicodeEncodeError:
+        pass
+    # Try to extract filename and re-encode
+    # Match filename=, filename*=, or filename*=UTF-8'' patterns
+    for pattern, prefix in [
+        (r"filename\*=UTF-8''([^;]+)", "filename*=UTF-8''"),
+        (r'filename\*="?([^";]+)"?', "filename*=UTF-8''"),
+        (r'filename="?([^";]+)"?', "filename*=UTF-8''"),
+    ]:
+        m = re.search(pattern, value)
+        if m:
+            raw_name = m.group(1).strip().strip('"')
+            encoded = quote(raw_name, safe="")
+            return f"attachment; {prefix}{encoded}"
+    # Last resort: just use "download" as filename
+    return 'attachment; filename="download"'
 
 
 def _dedicated_runtime_backend() -> str:
@@ -644,7 +678,11 @@ async def _proxy_file_request(request: Request, token: str, bridge_path: str):
             async with async_session() as db:
                 container = await ensure_running(db, user.id)
             content, media_type = read_file_from_hermes_container(container.docker_id, normalized_path)
-            return Response(content=content, media_type=media_type)
+            headers = {}
+            if media_type == "application/zip":
+                folder_name = normalized_path.rstrip("/").rsplit("/", 1)[-1] or "download"
+                headers["Content-Disposition"] = _safe_content_disposition(f"{folder_name}.zip")
+            return Response(content=content, media_type=media_type, headers=headers)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Dedicated Hermes file proxy only supports filemanager/serve and filemanager/download",
@@ -669,7 +707,8 @@ async def _proxy_file_request(request: Request, token: str, bridge_path: str):
         content=resp.content,
         status_code=resp.status_code,
         media_type=resp.headers.get("content-type", "application/octet-stream"),
-        headers={k: v for k, v in resp.headers.items() if k.lower() in ("content-disposition",)},
+        headers={k: _sanitize_content_disposition(v)
+                   for k, v in resp.headers.items() if k.lower() in ("content-disposition",)},
     )
 
 
@@ -747,7 +786,8 @@ async def proxy_http(
         content=resp.content,
         status_code=resp.status_code,
         media_type=resp.headers.get("content-type", "application/json"),
-        headers={k: v for k, v in resp.headers.items() if k.lower() in ("content-disposition",)},
+        headers={k: _sanitize_content_disposition(v)
+                   for k, v in resp.headers.items() if k.lower() in ("content-disposition",)},
     )
 
 

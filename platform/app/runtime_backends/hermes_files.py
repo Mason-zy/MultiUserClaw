@@ -7,6 +7,7 @@ import posixpath
 import shlex
 import tarfile
 import time
+import zipfile
 
 from docker.errors import APIError as DockerAPIError
 from docker.errors import NotFound as DockerNotFound
@@ -165,9 +166,20 @@ def normalize_hermes_read_path(requested_path: str | None) -> str:
         ):
             return normalized
     else:
-        normalized = normalize_hermes_workspace_path(raw)
+        raw = raw.lstrip("/")
+        normalized = posixpath.normpath(raw)
+        if normalized in {"", ".", ".."} or normalized.startswith("../"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Hermes file path is unavailable",
+            )
         return f"{HERMES_DATA_ROOT}/{normalized}"
-    normalized = normalize_hermes_workspace_path(raw)
+    normalized = posixpath.normpath(raw)
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Hermes file path is unavailable",
+        )
     return f"{HERMES_DATA_ROOT}/{normalized}"
 
 
@@ -576,14 +588,24 @@ def read_file_from_hermes_container(
 
     archive = b"".join(stream)
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as tar:
-        for member in tar:
-            if not member.isfile():
-                continue
-            extracted = tar.extractfile(member)
-            if extracted is None:
-                continue
-            media_type = mimetypes.guess_type(media_path)[0] or "application/octet-stream"
-            return extracted.read(), media_type
+        files = [m for m in tar.getmembers() if m.isfile()]
+
+        if len(files) == 1:
+            extracted = tar.extractfile(files[0])
+            if extracted is not None:
+                media_type = mimetypes.guess_type(media_path)[0] or "application/octet-stream"
+                return extracted.read(), media_type
+
+        if files:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for member in files:
+                    f = tar.extractfile(member)
+                    if f is None:
+                        continue
+                    zf.writestr(member.name, f.read())
+            zip_buffer.seek(0)
+            return zip_buffer.read(), "application/zip"
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,

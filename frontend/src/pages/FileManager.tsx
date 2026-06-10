@@ -10,6 +10,8 @@ import {
   FolderPlus,
   Home,
   ChevronRight,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react'
 import {
   browseFiles,
@@ -30,7 +32,35 @@ export default function FileManager() {
   const [newFolderName, setNewFolderName] = useState('')
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [sortBy, setSortBy] = useState<'name' | 'size' | 'modified'>('name')
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const toggleSort = (field: 'name' | 'size' | 'modified') => {
+    if (sortBy === field) {
+      setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortBy(field)
+      setSortOrder(field === 'modified' ? 'desc' : 'asc')
+    }
+  }
+
+  const sortedItems = (items: FileEntry[]) => {
+    const dirs = items.filter(e => e.type === 'directory')
+    const files = items.filter(e => e.type !== 'directory')
+    const compare = (a: FileEntry, b: FileEntry) => {
+      let result = 0
+      if (sortBy === 'name') {
+        result = a.name.localeCompare(b.name)
+      } else if (sortBy === 'size') {
+        result = (a.size ?? 0) - (b.size ?? 0)
+      } else {
+        result = (a.modified || '').localeCompare(b.modified || '')
+      }
+      return sortOrder === 'asc' ? result : -result
+    }
+    return [...dirs.sort(compare), ...files.sort(compare)]
+  }
 
   const loadDir = async (dirPath: string) => {
     setLoading(true)
@@ -278,15 +308,21 @@ export default function FileManager() {
         <div className="rounded-xl border border-dark-border bg-dark-card overflow-hidden">
           {/* Table header */}
           <div className="grid grid-cols-[1fr_100px_160px_100px] gap-2 border-b border-dark-border bg-dark-bg px-4 py-2 text-xs font-medium text-dark-text-secondary">
-            <span>名称</span>
-            <span className="text-right">大小</span>
-            <span className="text-right">修改时间</span>
+            <button onClick={() => toggleSort('name')} className="flex items-center gap-1 hover:text-dark-text transition-colors">
+              名称 {sortBy === 'name' && (sortOrder === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
+            </button>
+            <button onClick={() => toggleSort('size')} className="flex items-center justify-end gap-1 hover:text-dark-text transition-colors">
+              大小 {sortBy === 'size' && (sortOrder === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
+            </button>
+            <button onClick={() => toggleSort('modified')} className="flex items-center justify-end gap-1 hover:text-dark-text transition-colors">
+              修改时间 {sortBy === 'modified' && (sortOrder === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
+            </button>
             <span className="text-right">操作</span>
           </div>
 
           {data?.items && data.items.length > 0 ? (
             <div>
-              {data.items.map(entry => {
+              {sortedItems(data.items).map(entry => {
                 const isDir = entry.type === 'directory'
                 const isDeleting = deleting === entry.path
                 const isPreviewing = previewFile?.name === entry.name
