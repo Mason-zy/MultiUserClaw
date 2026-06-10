@@ -73,6 +73,9 @@ def _hermes_to_frontend(config: dict) -> dict:
     model_section = config.get("model") or {}
     if isinstance(model_section, dict):
         default_model = model_section.get("default", "")
+        provider = model_section.get("provider", "")
+        if provider and default_model and "/" not in default_model:
+            default_model = f"{provider}/{default_model}"
 
     providers: dict = {}
 
@@ -92,7 +95,7 @@ def _hermes_to_frontend(config: dict) -> dict:
         if not isinstance(cp, dict):
             continue
         name = cp.get("name", "")
-        if not name or name == "platform-gateway":
+        if not name or name in ("platform", "platform-gateway"):
             continue
         providers[name] = {
             "baseUrl": cp.get("base_url", ""),

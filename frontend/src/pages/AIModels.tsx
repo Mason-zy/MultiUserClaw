@@ -120,9 +120,10 @@ export default function AIModels() {
 
   // Pick a provider from catalog to add
   const handlePickProvider = (info: ProviderInfo) => {
-    // For custom type or re-adding same provider, generate a unique name
+    // For custom type or re-adding same provider, generate a unique name.
+    // Bare "custom" is reserved by the runtime — always append a suffix.
     let name = info.id
-    if (configuredProviders[name]) {
+    if (configuredProviders[name] || info.id === 'custom') {
       let i = 2
       while (configuredProviders[`${info.id}-${i}`]) i++
       name = `${info.id}-${i}`
