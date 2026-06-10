@@ -253,55 +253,6 @@ def check_uv(fix: bool) -> CheckResult:
     return CheckResult(False, "安装 uv 失败，请手动安装: https://docs.astral.sh/uv/getting-started/installation/")
 
 
-def check_postgres_database(fix: bool) -> CheckResult:
-    """检查 PostgreSQL 数据库和角色是否存在。
-
-    检查:
-    1. openclaw-local-postgres 容器是否运行
-    2. nanobot 角色是否存在
-    3. nanobot_platform 数据库是否存在
-    """
-    # 1. 检查容器是否运行
-    r = run("docker", "ps", "-q", "--filter", "name=openclaw-local-postgres")
-    if r.returncode != 0 or not r.stdout.strip():
-        if not fix:
-            return CheckResult(False, "openclaw-local-postgres 容器未运行，请先启动: python start_local.py --only db")
-        return CheckResult(False, "openclaw-local-postgres 容器未运行，需要手动启动")
-
-    # 2. 检查角色
-    r = run("docker", "exec", "openclaw-local-postgres", "psql", "-U", "nanobot", "-d", "postgres", "-c", "\du")
-    if r.returncode != 0:
-        return CheckResult(False, "无法连接到 PostgreSQL 容器检查角色")
-
-    if "nanobot" not in r.stdout:
-        if fix:
-            # 尝试创建角色
-            info("创建 nanobot 角色...")
-            r2 = run("docker", "exec", "openclaw-local-postgres", "psql", "-U", "postgres", "-c",
-                    "CREATE USER nanobot WITH SUPERUSER CREATEDB CREATEROLE REPLICATION ENCRYPTED PASSWORD 'nanobot'",
-                    capture=False)
-            if r2.returncode == 0:
-                return CheckResult(True, "nanobot 角色已创建", fixed=True)
-        return CheckResult(False, "nanobot 角色不存在")
-
-    # 3. 检查数据库
-    r = run("docker", "exec", "openclaw-local-postgres", "psql", "-U", "nanobot", "-d", "postgres", "-c", "\l")
-    if r.returncode != 0:
-        return CheckResult(False, "无法连接到 PostgreSQL 容器检查数据库")
-
-    if "nanobot_platform" not in r.stdout:
-        if fix:
-            # 尝试创建数据库
-            info("创建 nanobot_platform 数据库...")
-            r2 = run("docker", "exec", "openclaw-local-postgres", "psql", "-U", "nanobot", "-d", "postgres", "-c",
-                    "CREATE DATABASE nanobot_platform", capture=False)
-            if r2.returncode == 0:
-                return CheckResult(True, "nanobot_platform 数据库已创建", fixed=True)
-        return CheckResult(False, "nanobot_platform 数据库不存在")
-
-    return CheckResult(True, "PostgreSQL 数据库和角色就绪")
-
-
 def _uv_cmd() -> list[str]:
     """返回可用的 uv 命令前缀（全局 uv 或 python -m uv）。"""
     if shutil.which("uv"):
@@ -444,72 +395,15 @@ def check_frontend_deps(fix: bool) -> CheckResult:
 
 # ── 主流程 ────────────────────────────────────────────────────────────
 
-OPENCLAW_DIR = PROJECT_DIR / "openclaw"
-BRIDGE_DIR   = OPENCLAW_DIR / "bridge"
-
-
-def check_openclaw_deps(fix: bool) -> CheckResult:
-    """检查 openclaw 主项目依赖是否已安装（pnpm install）。"""
-    nm = OPENCLAW_DIR / "node_modules"
-    if nm.exists() and any(nm.iterdir()):
-        return CheckResult(True, "openclaw node_modules 已就绪")
-
-    if not fix:
-        return CheckResult(False, "openclaw node_modules 不存在，运行 prepare.py 自动安装")
-
-    pnpm = shutil.which("pnpm")
-    if not pnpm:
-        # Try installing pnpm first
-        info("正在安装 pnpm...")
-        subprocess.run("npm install -g pnpm", shell=True, text=True)
-        pnpm = shutil.which("pnpm")
-        if not pnpm:
-            return CheckResult(False, "pnpm 未安装，请先运行: npm install -g pnpm")
-
-    info("正在执行 pnpm install（openclaw 主项目）...")
-    r = subprocess.run(
-        f"{pnpm} install",
-        cwd=str(OPENCLAW_DIR),
-        shell=True, text=True,
-    )
-    if r.returncode == 0:
-        return CheckResult(True, "pnpm install 完成", fixed=True)
-    return CheckResult(False, f"pnpm install 失败（exit {r.returncode}）")
+HERMES_AGENT_DIR = PROJECT_DIR / "hermes-agent"
 
 
 def check_bridge_deps(fix: bool) -> CheckResult:
-    """检查 bridge 依赖是否已安装（npm install in bridge/）。"""
-    nm = BRIDGE_DIR / "node_modules"
-    if nm.exists() and any(nm.iterdir()):
-        return CheckResult(True, "bridge node_modules 已就绪")
-
-    if not BRIDGE_DIR.exists():
-        return CheckResult(False, f"{BRIDGE_DIR} 目录不存在")
-
-    # Check if package.json exists (copied from bridge-package.json)
-    pkg_json = BRIDGE_DIR / "package.json"
-    if not pkg_json.exists():
-        bridge_pkg = OPENCLAW_DIR / "bridge-package.json"
-        if bridge_pkg.exists():
-            if fix:
-                info("从 bridge-package.json 复制 package.json...")
-                import shutil as _sh
-                _sh.copy2(bridge_pkg, pkg_json)
-            else:
-                return CheckResult(False, "bridge/package.json 不存在")
-
-    if not fix:
-        return CheckResult(False, "bridge node_modules 不存在")
-
-    info("正在执行 npm install（bridge 依赖）...")
-    r = subprocess.run(
-        "npm install",
-        cwd=str(BRIDGE_DIR),
-        shell=True, text=True,
-    )
-    if r.returncode == 0:
-        return CheckResult(True, "npm install 完成", fixed=True)
-    return CheckResult(False, f"npm install 失败（exit {r.returncode}）")
+    """检查 hermes-agent Dockerfile.bridge 是否存在。"""
+    dockerfile = HERMES_AGENT_DIR / "Dockerfile.bridge"
+    if dockerfile.exists():
+        return CheckResult(True, "hermes-agent/Dockerfile.bridge 已就绪")
+    return CheckResult(False, "hermes-agent/Dockerfile.bridge 不存在")
 
 
 CHECKS = [
@@ -521,15 +415,17 @@ CHECKS = [
     ("Platform Python 依赖",  check_platform_deps,      False, False),
     ("Node.js / npm",         check_nodejs,             False, False),
     ("前端 node_modules",     check_frontend_deps,      False, False),
-    ("OpenClaw 主项目依赖",   check_openclaw_deps,      False, False),
-    ("Bridge 依赖",           check_bridge_deps,        False, False),
+    ("Hermes-Agent Bridge",   check_bridge_deps,        False, False),
 ]
 
 DOCKER_IMAGES = [
     "postgres:16-alpine",  # 数据库
-    "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",  # 后端 platform 网关
-    "node:22-slim",  # openclaw-bridge 用户容器
+    "node:22-slim",  # hermes-agent 用户容器
     "node:20-alpine",  # frontend
+    # hermes-agent Dockerfile 依赖的基础镜像
+    "ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie",
+    "tianon/gosu:1.19-trixie",
+    "debian:13.4",
 ]
 
 
@@ -605,18 +501,10 @@ def main():
     else:
         fail(r.detail)
 
-    # 5.5. PostgreSQL 数据库
+    # 5.5. PostgreSQL 数据库 (由 docker-compose 管理，跳过本地检查)
     step("5.5. PostgreSQL 数据库")
-    if not docker_ok:
-        results["PostgreSQL 数据库"] = CheckResult(False, "跳过（Docker 未运行）")
-        warn("跳过（Docker 未运行）")
-    else:
-        r = check_postgres_database(fix=fix)
-        results["PostgreSQL 数据库"] = r
-        if r.passed:
-            ok(r.detail + (" (已修复)" if r.fixed else ""))
-        else:
-            fail(r.detail)
+    info("数据库由 Docker Compose 管理，跳过本地检查")
+    results["PostgreSQL 数据库"] = CheckResult(True, "由 Docker Compose 管理")
 
     # 6. Platform 依赖
     step("6. Platform Gateway Python 依赖")
@@ -654,31 +542,14 @@ def main():
         else:
             fail(r.detail)
 
-    # 9. OpenClaw 主项目依赖
-    step("9. OpenClaw 主项目依赖")
-    if not node_ok:
-        results["OpenClaw 主项目依赖"] = CheckResult(False, "跳过（npm 不可用）")
-        warn("跳过（npm 不可用）")
+    # 9. Bridge 依赖
+    step("9. Hermes-Agent Bridge")
+    r = check_bridge_deps(fix=fix)
+    results["Hermes-Agent Bridge"] = r
+    if r.passed:
+        ok(r.detail)
     else:
-        r = check_openclaw_deps(fix=fix)
-        results["OpenClaw 主项目依赖"] = r
-        if r.passed:
-            ok(r.detail)
-        else:
-            fail(r.detail)
-
-    # 10. Bridge 依赖
-    step("10. Bridge 依赖")
-    if not node_ok:
-        results["Bridge 依赖"] = CheckResult(False, "跳过（npm 不可用）")
-        warn("跳过（npm 不可用）")
-    else:
-        r = check_bridge_deps(fix=fix)
-        results["Bridge 依赖"] = r
-        if r.passed:
-            ok(r.detail)
-        else:
-            fail(r.detail)
+        fail(r.detail)
 
     # ── 汇总 ──────────────────────────────────────────────────────────
     passed  = [k for k, v in results.items() if v.passed]
