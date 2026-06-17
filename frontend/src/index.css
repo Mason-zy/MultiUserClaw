@@ -15,12 +15,23 @@
   --color-accent-purple: #8b5cf6;
 }
 
+html.light {
+  --color-dark-bg: #f0f4f8;
+  --color-dark-sidebar: #ffffff;
+  --color-dark-card: #ffffff;
+  --color-dark-card-hover: #e8eef5;
+  --color-dark-border: #cbd5e1;
+  --color-dark-text: #1e293b;
+  --color-dark-text-secondary: #64748b;
+}
+
 body {
   margin: 0;
   padding: 0;
   background-color: var(--color-dark-bg);
   color: var(--color-dark-text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  transition: background-color 0.2s, color 0.2s;
 }
 
 ::-webkit-scrollbar {

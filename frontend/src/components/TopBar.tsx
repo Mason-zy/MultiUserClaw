@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ping, logout, getContainerInfo } from '../lib/api'
 import NotificationBell from './NotificationBell'
+import ThemeToggle from './ThemeToggle'
 
 type ServiceStatus = 'initializing' | 'online' | 'offline'
 
@@ -143,6 +144,9 @@ export default function TopBar() {
           />
           {statusConfig.text}
         </div>
+
+        {/* 主题切换 */}
+        <ThemeToggle />
 
         {/* ✅ 使用组件 */}
         <NotificationBell />

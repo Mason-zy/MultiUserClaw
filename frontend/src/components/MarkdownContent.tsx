@@ -17,7 +17,7 @@ function CodeBlock({ className, children }: { className?: string; children: Reac
   }
 
   return (
-    <div className="group relative my-2 rounded-lg bg-[#1a1a2e] border border-dark-border overflow-hidden">
+    <div className="group relative my-2 rounded-lg bg-dark-card border border-dark-border overflow-hidden">
       <div className="flex items-center justify-between px-3 py-1.5 bg-dark-bg/50 border-b border-dark-border">
         <span className="text-[10px] text-dark-text-secondary uppercase tracking-wider">{lang || 'code'}</span>
         <button
