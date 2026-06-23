@@ -125,14 +125,40 @@ def normalize_hermes_workspace_path(requested_path: str | None) -> str:
     return normalized
 
 
+# def normalize_hermes_filemanager_path(requested_path: str | None) -> str:
+#     raw = (requested_path or "").strip().replace("\\", "/")
+#     raw = raw.removeprefix("~/.openclaw/")
+#     raw = raw.removeprefix("/root/.openclaw/")
+#     raw = raw.removeprefix("root/.openclaw/")
+#     raw = raw.removeprefix("/opt/data/")
+#     return _normalize_profile_storage_path(raw)
+
+#针对文件管路径调整至/opt/data作处理
 def normalize_hermes_filemanager_path(requested_path: str | None) -> str:
     raw = (requested_path or "").strip().replace("\\", "/")
+
     raw = raw.removeprefix("~/.openclaw/")
     raw = raw.removeprefix("/root/.openclaw/")
     raw = raw.removeprefix("root/.openclaw/")
-    raw = raw.removeprefix("/opt/data/")
-    return _normalize_profile_storage_path(raw)
 
+    # 首页直接定位到 /opt/data
+    if not raw:
+        return "/opt/data"
+
+    # 如果前端已经传绝对路径
+    if raw.startswith("/"):
+        target = posixpath.normpath(raw)
+    else:
+        target = posixpath.normpath(f"/opt/data/{raw}")
+
+    # 防止越界
+    if not target.startswith("/opt/data"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Hermes file path cannot escape /opt/data",
+        )
+
+    return target
 
 def normalize_hermes_read_path(requested_path: str | None) -> str:
     raw = (requested_path or "").strip().replace("\\", "/")
@@ -202,7 +228,7 @@ def fail(code, detail):
     raise SystemExit(code)
 
 parts = target.split(os.sep)
-if not (target.startswith(profiles + os.sep) and "workspace" in parts):
+if not target.startswith(root):
     fail(2, "Hermes file path is unavailable")
 if not os.path.exists(target):
     fail(4, "Hermes file not found")
@@ -234,7 +260,7 @@ if os.path.isdir(target):
     payload = {
         "type": "directory",
         "path": display_path(os.path.relpath(target, root).replace(os.sep, "/")),
-        "root": "/opt/data/profiles",
+        "root": "/opt/data",
         "items": items,
         "runtime": "hermes",
     }
@@ -369,7 +395,12 @@ def delete_hermes_filemanager_path(container_id_or_name: str | None, requested_p
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hermes runtime container is unavailable",
         ) from exc
-    absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
+#     absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
+    # 文件路径调整至/opt/data删除知识库文件传绝对路径
+    if storage_path.startswith("/opt/data"):
+        absolute_path = storage_path
+    else:
+        absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
     result = container.exec_run(["sh", "-lc", f"rm -rf -- {shlex.quote(absolute_path)}"])
     exit_code, output = _exec_output(result)
     if exit_code != 0:
