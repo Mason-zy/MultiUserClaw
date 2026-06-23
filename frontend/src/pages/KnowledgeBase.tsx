@@ -23,8 +23,7 @@ import type { FileEntry, BrowseResult } from '../lib/api'
 
 /** Resolve the knowledge base root path for an agent */
 function knowledgeRoot(agentId: string): string {
-  if (agentId === 'main') return 'workspace/knowledge'
-  return `workspace-${agentId}/knowledge`
+  return `profiles/${agentId}/workspace/knowledge`
 }
 
 export default function KnowledgeBase() {
@@ -276,7 +275,7 @@ export default function KnowledgeBase() {
               <button
                 onClick={() => navigateTo('')}
                 className="flex items-center gap-1 text-dark-text-secondary hover:text-accent-blue transition-colors"
-                title={`~/.openclaw/${knowledgeRoot(selectedAgent)}`}
+                title={`/opt/data/${knowledgeRoot(selectedAgent)}`}
               >
                 <BookOpen size={15} />
                 <span className="text-xs">knowledge</span>
@@ -360,7 +359,7 @@ export default function KnowledgeBase() {
 
           {/* Knowledge path hint */}
           <div className="mb-4 rounded-lg bg-accent-blue/5 border border-accent-blue/10 px-4 py-2.5 text-xs text-dark-text-secondary">
-            知识库路径：<code className="rounded bg-dark-bg px-1.5 py-0.5 text-accent-blue">~/.openclaw/{knowledgeRoot(selectedAgent)}{subPath ? `/${subPath}` : ''}</code>
+            知识库路径：<code className="rounded bg-dark-bg px-1.5 py-0.5 text-accent-blue">/opt/data/{knowledgeRoot(selectedAgent)}{subPath ? `/${subPath}` : ''}</code>
             <span className="ml-2">— Agent 可在对话中引用此目录下的文件</span>
           </div>
 
