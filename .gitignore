@@ -75,3 +75,15 @@ hermes-agent/deploy_copy
 openclaw
 platform/deploy_copy
 tmp_skillstore_tests/
+
+# baime loop-backlog runtime (不 commit)
+backlog/.agent-done-*
+backlog/.basic-daemon.*
+backlog/.caps/
+backlog/.locks/
+backlog/.loop-lock
+backlog/.loop-stop
+backlog/.active-agents
+backlog/.merge-lock
+backlog/.monitor-task-id
+backlog/.loop-checkpoint

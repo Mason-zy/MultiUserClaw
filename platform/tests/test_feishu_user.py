@@ -55,6 +55,11 @@ class FakeDb:
     async def commit(self):
         self.committed = True
 
+    async def refresh(self, record):
+        # no-op stand-in: record is already a SimpleNamespace; mirrors
+        # SQLAlchemy re-fetching the persisted row after COMMIT.
+        return record
+
 
 def _user(sso_uid=None, username="taken", email="taken@x.com"):
     return SimpleNamespace(
@@ -77,7 +82,7 @@ async def test_get_or_create_feishu_user_creates_new():
     assert user.email == "a@b.com"
     assert user.password_hash  # non-empty random placeholder
     assert db.added == [user]
-    assert db.flushed is True
+    assert db.committed is True  # TASK-1 hotfix: must commit (flush alone doesn't persist)
 
 
 async def test_get_or_create_feishu_user_returns_existing():
@@ -116,3 +121,21 @@ async def test_existing_create_or_update_sso_user_unchanged():
     assert "provider" not in params
     # And the new feishu function exists separately
     assert hasattr(service, "get_or_create_feishu_user")
+
+
+async def test_create_new_user_commits_not_flushes():
+    """Regression: new user MUST commit (not just flush) to persist.
+
+    TASK-1 hotfix: ``get_or_create_feishu_user`` originally used ``db.flush()``,
+    which assigns an id in-transaction but does NOT persist. The callback then
+    issued a JWT, but ``/me`` -> ``get_user_by_id`` returned None -> 401 ->
+    frontend cleared the token and kicked back to /login. FakeDb's flush/commit
+    are no-ops, so only an explicit ``committed`` assertion catches this class
+    of bug — see CLAUDE.md "写操作测试约定".
+    """
+    db = FakeDb(lookups={"sso_uid_1": None, "username_1": None})
+    await get_or_create_feishu_user(
+        db, sso_uid="feishu:ou_new", display_name="Bob", email="b@x.com"
+    )
+    assert db.committed is True
+    assert db.flushed is False  # hotfix replaced flush with commit+refresh

@@ -5,6 +5,12 @@ services:
   postgres:
     volumes:
       - pgdata_new:/var/lib/postgresql/data
+  gateway:
+    environment:
+      PLATFORM_FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      PLATFORM_FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      PLATFORM_FEISHU_CALLBACK_URL: ${FEISHU_CALLBACK_URL:-}
+      PLATFORM_FEISHU_FRONTEND_REDIRECT_URL: ${FEISHU_FRONTEND_REDIRECT_URL:-}
 
 volumes:
   pgdata_new:

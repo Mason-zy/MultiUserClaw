@@ -218,5 +218,6 @@ async def get_or_create_feishu_user(
         password_hash=hash_password(_random_password()),
     )
     db.add(user)
-    await db.flush()
+    await db.commit()
+    await db.refresh(user)
     return user
