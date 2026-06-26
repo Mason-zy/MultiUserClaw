@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     training_trace_dir: str = ".hermes/training_traces"
     training_trace_hash_salt: str = ""
 
+    # Feishu SSO (read from env; never hardcode secrets)
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    feishu_base_url: str = "https://open.feishu.cn/open-apis"
+    feishu_callback_url: str = ""
+    feishu_frontend_redirect_url: str = ""
+
     model_config = {"env_prefix": "PLATFORM_"}
 
 
