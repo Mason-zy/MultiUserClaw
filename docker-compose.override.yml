@@ -1,0 +1,10 @@
+# 本地覆盖：让 postgres 用全新空卷 pgdata_new
+# 老卷 openclaw_pgdata 被 stopped 容器引用着，原样保留
+# 回滚方法：rm docker-compose.override.yml
+services:
+  postgres:
+    volumes:
+      - pgdata_new:/var/lib/postgresql/data
+
+volumes:
+  pgdata_new:

@@ -19,7 +19,7 @@ services:
       POSTGRES_PASSWORD: nanobot
       POSTGRES_DB: nanobot_platform
     ports:
-      - "15432:5432"
+      - "9901:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -39,7 +39,7 @@ services:
         APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-http://mirrors.ustc.edu.cn/debian-security}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     ports:
-      - "8080:8080"
+      - "9900:8080"
     environment:
       PLATFORM_DATABASE_URL: postgresql+asyncpg://nanobot:nanobot@postgres:5432/nanobot_platform
       PLATFORM_JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
