@@ -1190,7 +1190,7 @@ def _start_hermes_terminal_socket(container_id_or_name: str, command: str):
         stderr=True,
         tty=True,
         socket=True,
-        workdir="/workspace",
+        workdir="/opt/data",
         user="hermes",
     )
     return getattr(result, "output", result[1] if isinstance(result, tuple) else result)
