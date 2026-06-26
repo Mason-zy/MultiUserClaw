@@ -515,6 +515,170 @@ def _sanitize_openclaw_config(config_json: str) -> tuple[str, list[str]]:
     return _json.dumps(cfg, indent=2, ensure_ascii=False), fixes
 
 
+@router.post("/container/restart")
+async def restart_user_container(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restart the current user's runtime container.
+
+    Used after in-terminal config changes (e.g. ``hermes gateway setup`` writing
+    FEISHU_* to /opt/data/.env) so the gateway reloads the new environment
+    without the user needing host/docker access.
+    """
+    container = await get_container(db, user.id)
+    if container is None:
+        raise HTTPException(status_code=404, detail="No container found")
+    try:
+        client = docker.from_env()
+        dc = client.containers.get(container.docker_id)
+        dc.restart(timeout=10)
+        return {"success": True, "restarted": True}
+    except docker.errors.NotFound:
+        raise HTTPException(status_code=404, detail="Docker container not found")
+    except Exception as e:
+        logger.error("container restart failed for %s: %s", user.id[:8], e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Restart failed: {e}")
+
+
+# ── Feishu / Lark scan-to-create onboarding (OAuth2 device-code flow) ──
+# Reuses the same endpoints hermes uses internally
+# (accounts.feishu.cn/oauth/v1/app/registration) so the user scans a QR code
+# rendered in the browser and a bot app is created automatically — no terminal.
+_FEISHU_ACCOUNTS_URLS = {"feishu": "https://accounts.feishu.cn", "lark": "https://accounts.larksuite.com"}
+_FEISHU_REGISTRATION_PATH = "/oauth/v1/app/registration"
+
+
+async def _feishu_registration_post(domain: str, form: dict) -> dict:
+    base = _FEISHU_ACCOUNTS_URLS.get(domain, _FEISHU_ACCOUNTS_URLS["feishu"])
+    url = f"{base}{_FEISHU_REGISTRATION_PATH}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(url, data=form)
+        # Feishu returns JSON even on 4xx (e.g. authorization_pending is a 400).
+        try:
+            return resp.json()
+        except Exception:
+            return {"error": "http_error", "status_code": resp.status_code, "body": resp.text}
+
+
+@router.post("/feishu/onboard/begin")
+async def feishu_onboard_begin():
+    """Start the device-code flow. Returns qr_url + device_code for the browser to render."""
+    domain = "feishu"
+    init_res = await _feishu_registration_post(domain, {"action": "init"})
+    methods = init_res.get("supported_auth_methods") or []
+    if "client_secret" not in methods:
+        raise HTTPException(status_code=502, detail=f"Feishu registration unsupported (methods={methods})")
+    begin_res = await _feishu_registration_post(domain, {
+        "action": "begin",
+        "archetype": "PersonalAgent",
+        "auth_method": "client_secret",
+        "request_user_info": "open_id",
+    })
+    device_code = begin_res.get("device_code")
+    if not device_code:
+        raise HTTPException(status_code=502, detail=f"Feishu begin failed: {begin_res}")
+    qr_url = begin_res.get("verification_uri_complete", "") or ""
+    qr_url += ("&" if "?" in qr_url else "?") + "from=hermes&tp=hermes"
+    return {
+        "qr_url": qr_url,
+        "device_code": device_code,
+        "interval": begin_res.get("interval") or 5,
+        "expire_in": begin_res.get("expire_in") or 600,
+        "domain": domain,
+    }
+
+
+@router.post("/feishu/onboard/poll")
+async def feishu_onboard_poll(payload: dict):
+    """Single poll of the device-code flow. The browser polls this every few seconds."""
+    device_code = (payload.get("device_code") or "").strip()
+    domain = (payload.get("domain") or "feishu").strip()
+    if not device_code:
+        raise HTTPException(status_code=400, detail="device_code required")
+    res = await _feishu_registration_post(domain, {
+        "action": "poll",
+        "device_code": device_code,
+        "tp": "ob_app",
+    })
+    # Auto-detect Lark (international) users and switch domain mid-flow.
+    user_info = res.get("user_info") or {}
+    if user_info.get("tenant_brand") == "lark" and domain != "lark":
+        res = await _feishu_registration_post("lark", {
+            "action": "poll", "device_code": device_code, "tp": "ob_app",
+        })
+        domain = "lark"
+        user_info = res.get("user_info") or {}
+    client_id = res.get("client_id")
+    client_secret = res.get("client_secret")
+    if client_id and client_secret:
+        return {
+            "status": "success",
+            "app_id": client_id,
+            "app_secret": client_secret,
+            "domain": domain,
+            "open_id": user_info.get("open_id"),
+        }
+    error = res.get("error", "")
+    if error in ("access_denied", "expired_token"):
+        return {"status": error, "error": error}
+    return {"status": "pending"}
+
+
+@router.post("/feishu/onboard/commit")
+async def feishu_onboard_commit(
+    payload: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist Feishu credentials into the user container's /opt/data/.env and restart it."""
+    app_id = (payload.get("app_id") or "").strip()
+    app_secret = (payload.get("app_secret") or "").strip()
+    domain = (payload.get("domain") or "feishu").strip()
+    if not app_id or not app_secret:
+        raise HTTPException(status_code=400, detail="app_id and app_secret required")
+    container = await get_container(db, user.id)
+    if container is None:
+        raise HTTPException(status_code=404, detail="No container found")
+    try:
+        dc = get_docker_container(container.docker_id)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Hermes runtime container is unavailable")
+    # Write FEISHU_* as the hermes user so the file stays hermes-owned (avoids the
+    # root-owned .env → entrypoint chmod crash on next restart).
+    script = r'''
+import os, sys
+app_id, app_secret, domain = sys.argv[1], sys.argv[2], sys.argv[3]
+path = "/opt/data/.env"
+drop = ("FEISHU_APP_ID=", "FEISHU_APP_SECRET=", "FEISHU_DOMAIN=",
+        "FEISHU_CONNECTION_MODE=", "FEISHU_ALLOW_ALL_USERS=", "FEISHU_GROUP_POLICY=")
+lines = []
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as f:
+        lines = [l for l in f.read().splitlines() if not l.startswith(drop)]
+lines += [
+    f"FEISHU_APP_ID={app_id}",
+    f"FEISHU_APP_SECRET={app_secret}",
+    f"FEISHU_DOMAIN={domain}",
+    "FEISHU_CONNECTION_MODE=websocket",
+    "FEISHU_ALLOW_ALL_USERS=true",
+    "FEISHU_GROUP_POLICY=open",
+]
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+'''
+    result = dc.exec_run(["python3", "-c", script, app_id, app_secret, domain], user="hermes")
+    if getattr(result, "exit_code", 1) != 0:
+        out = result.output.decode("utf-8", errors="replace") if result.output else ""
+        raise HTTPException(status_code=500, detail=f"Failed to write .env: {out}")
+    try:
+        dc.restart(timeout=10)
+    except Exception as exc:
+        logger.error("feishu onboard restart failed for %s: %s", user.id[:8], exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Restart failed: {exc}")
+    return {"success": True, "restarted": True}
+
+
 @router.post("/container/doctor-fix")
 async def container_doctor_fix(
     user: User = Depends(get_current_user),
@@ -1027,6 +1191,7 @@ def _start_hermes_terminal_socket(container_id_or_name: str, command: str):
         tty=True,
         socket=True,
         workdir="/workspace",
+        user="hermes",
     )
     return getattr(result, "output", result[1] if isinstance(result, tuple) else result)
 
