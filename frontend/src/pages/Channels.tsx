@@ -13,6 +13,7 @@ import {
   CheckCircle,
   Smartphone,
   PlugZap,
+  QrCode,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import type {
@@ -27,10 +28,15 @@ import {
   deleteChannelConfig,
   getAccessToken,
   listPlugins,
+  feishuOnboardBegin,
+  feishuOnboardPoll,
+  feishuOnboardCommit,
 } from '../lib/api'
+import { QRCodeSVG } from 'qrcode.react'
 
 // Static channel catalog — only real OpenClaw-supported channels
 const CHANNEL_CATALOG: Array<{ id: string; label: string; description: string; icon: string }> = [
+  /* 已禁用：非飞书渠道暂不开放，需要时取消注释即可恢复
   { id: 'weixin', label: '微信', description: '通过 openclaw-weixin 插件扫码绑定，首次接入会显示二维码', icon: '🟩' },
   { id: 'telegram', label: 'Telegram', description: '通过 Telegram Bot 接入', icon: '✈️' },
   { id: 'discord', label: 'Discord', description: '通过 Discord Bot 接入', icon: '🎮' },
@@ -41,7 +47,9 @@ const CHANNEL_CATALOG: Array<{ id: string; label: string; description: string; i
   { id: 'web', label: 'Web', description: '内嵌网页对话框', icon: '🌐' },
   { id: 'googlechat', label: 'Google Chat', description: '通过 Google Chat API 接入', icon: '💚' },
   { id: 'msteams', label: 'Microsoft Teams', description: '通过 Azure Bot 接入 Teams', icon: '🟦' },
+  */
   { id: 'feishu', label: '飞书 / Lark', description: '通过飞书/Lark 机器人接入', icon: '📘' },
+  /* 已禁用：非飞书渠道暂不开放，需要时取消注释即可恢复
   { id: 'matrix', label: 'Matrix', description: '通过 Matrix 协议接入（支持 E2EE）', icon: '🔷' },
   { id: 'mattermost', label: 'Mattermost', description: '通过 Mattermost Bot 接入', icon: '🔵' },
   { id: 'irc', label: 'IRC', description: '通过 IRC 协议接入', icon: '📡' },
@@ -54,6 +62,7 @@ const CHANNEL_CATALOG: Array<{ id: string; label: string; description: string; i
   { id: 'qqbot', label: 'QQ', description: '通过 QQ 机器人接入（需安装 QQBot 插件）', icon: '🐧' },
   { id: 'wecom', label: '企业微信', description: '通过企业微信 AI Bot WebSocket 接入（需安装 WeCom 插件）', icon: '💼' },
   { id: 'dingtalk', label: '钉钉', description: '通过钉钉企业机器人接入（需安装 DingTalk 插件）', icon: '💙' },
+  */
 ]
 
 const CHANNEL_ICONS: Record<string, string> = Object.fromEntries(
@@ -374,6 +383,85 @@ export default function Channels() {
   // Delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [feishuGuideOpen, setFeishuGuideOpen] = useState(false)
+  const [feishuPhase, setFeishuPhase] = useState<'idle' | 'loading' | 'showing' | 'committing' | 'success' | 'error'>('idle')
+  const [feishuQrUrl, setFeishuQrUrl] = useState('')
+  const [feishuMsg, setFeishuMsg] = useState('')
+  const feishuOnboardRef = useRef<{ device_code: string; domain: string; interval: number; expiresAt: number } | null>(null)
+
+  const startFeishuOnboard = async () => {
+    setFeishuPhase('loading')
+    setFeishuMsg('')
+    feishuOnboardRef.current = null
+    try {
+      const r = await feishuOnboardBegin()
+      feishuOnboardRef.current = {
+        device_code: r.device_code,
+        domain: r.domain,
+        interval: r.interval,
+        expiresAt: Date.now() + (r.expire_in || 600) * 1000,
+      }
+      setFeishuQrUrl(r.qr_url)
+      setFeishuPhase('showing')
+    } catch (err: any) {
+      setFeishuPhase('error')
+      setFeishuMsg(err?.message || '启动接入失败')
+    }
+  }
+
+  // Closing the modal tears down polling (phase leaves 'showing' → effect cleanup)
+  // and resets state so the next open starts clean — no invisible background poller.
+  const closeFeishuGuide = () => {
+    feishuOnboardRef.current = null
+    setFeishuPhase('idle')
+    setFeishuGuideOpen(false)
+  }
+
+  // Poll the device-code flow while the QR is showing; commit on success.
+  useEffect(() => {
+    if (!feishuGuideOpen || feishuPhase !== 'showing' || !feishuOnboardRef.current) return
+    let active = true
+    const { device_code, domain, interval, expiresAt } = feishuOnboardRef.current
+    const tick = async () => {
+      if (!active) return
+      // Self-terminate at device-code expiry even if backend never returns expired_token.
+      if (Date.now() >= expiresAt) {
+        active = false
+        setFeishuPhase('error')
+        setFeishuMsg('二维码已过期，请重新接入')
+        return
+      }
+      try {
+        const r = await feishuOnboardPoll(device_code, domain)
+        if (!active) return
+        if (r.status === 'success' && r.app_id && r.app_secret) {
+          active = false
+          setFeishuPhase('committing')
+          try {
+            await feishuOnboardCommit(r.app_id, r.app_secret, r.domain || domain)
+            setFeishuPhase('success')
+            setFeishuMsg('✓ 飞书机器人创建成功，容器正在重启（约 10-20 秒后上线）')
+          } catch (e: any) {
+            setFeishuPhase('error')
+            setFeishuMsg('保存凭证失败：' + (e?.message || '未知错误'))
+          }
+        } else if (r.status === 'access_denied') {
+          active = false
+          setFeishuPhase('error')
+          setFeishuMsg('授权被拒绝，请重新扫码')
+        } else if (r.status === 'expired_token') {
+          active = false
+          setFeishuPhase('error')
+          setFeishuMsg('二维码已过期，请重新接入')
+        }
+      } catch {
+        // transient network error — keep polling
+      }
+    }
+    const id = window.setInterval(tick, Math.max(2, interval || 5) * 1000)
+    void tick()
+    return () => { active = false; window.clearInterval(id) }
+  }, [feishuPhase, feishuGuideOpen])
 
   // Channels configured in openclaw.json (may not have gateway accounts yet)
   const [configuredTypes, setConfiguredTypes] = useState<string[]>([])
@@ -619,9 +707,24 @@ export default function Channels() {
       {/* Available channels (not yet configured) */}
       {availableChannels.length > 0 && (
         <div>
-          <h2 className="text-sm font-semibold text-dark-text-secondary uppercase tracking-wider mb-3">
-            可用渠道
-          </h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-dark-text-secondary uppercase tracking-wider">
+              可用渠道
+            </h2>
+            <button
+              onClick={() => {
+                // 已绑定飞书时提醒：重新扫码会创建新机器人并覆盖现有凭证（commit 端点 drop+覆写）
+                if (configuredChannels.includes('feishu') &&
+                    !window.confirm('已绑定飞书机器人。重新扫码将创建一个新机器人并替换现有配置，原机器人将被废弃。是否继续？')) {
+                  return
+                }
+                setFeishuGuideOpen(true)
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-accent-blue/15 px-3 py-1.5 text-xs font-medium text-accent-blue hover:bg-accent-blue/25 transition-colors"
+            >
+              <QrCode size={14} /> 扫码接入飞书
+            </button>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {availableChannels.map((ch) => (
               <button
@@ -699,6 +802,82 @@ export default function Channels() {
                 {deleting ? <Loader2 size={14} className="animate-spin" /> : '删除'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 飞书扫码自动接入弹窗（device flow，无需终端）*/}
+      {feishuGuideOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="rounded-xl bg-dark-card border border-dark-border p-6 max-w-md w-full mx-4 shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="flex items-center gap-2 text-base font-semibold text-dark-text"><QrCode size={18} /> 接入飞书机器人</h3>
+              <button onClick={closeFeishuGuide} className="text-dark-text-secondary hover:text-dark-text">
+                <X size={18} />
+              </button>
+            </div>
+
+            {feishuPhase === 'idle' && (
+              <div className="space-y-3 text-sm text-dark-text-secondary">
+                <p>点击下方按钮，用飞书 App 扫码即可自动创建机器人应用，全程无需终端。</p>
+                <button
+                  onClick={startFeishuOnboard}
+                  className="w-full rounded-lg bg-accent-blue py-2.5 text-sm font-medium text-white hover:bg-accent-blue/90 transition-colors"
+                >
+                  <QrCode size={14} className="mr-1.5 inline" /> 开始扫码接入
+                </button>
+              </div>
+            )}
+
+            {feishuPhase === 'loading' && (
+              <div className="flex items-center justify-center py-10 text-sm text-dark-text-secondary">
+                <Loader2 size={16} className="animate-spin mr-2" /> 正在生成二维码…
+              </div>
+            )}
+
+            {feishuPhase === 'showing' && feishuQrUrl && (
+              <div className="flex flex-col items-center gap-3">
+                <div className="rounded-lg bg-white p-3">
+                  <QRCodeSVG value={feishuQrUrl} size={192} />
+                </div>
+                <p className="text-sm text-dark-text-secondary text-center">用飞书 App 扫描上方二维码，确认授权创建机器人</p>
+                <div className="flex items-center gap-2 text-xs text-dark-text-secondary">
+                  <Loader2 size={12} className="animate-spin" /> 等待扫码授权…
+                </div>
+              </div>
+            )}
+
+            {feishuPhase === 'committing' && (
+              <div className="flex items-center justify-center py-10 text-sm text-dark-text-secondary">
+                <Loader2 size={16} className="animate-spin mr-2" /> 扫码成功，正在创建机器人并重启容器…
+              </div>
+            )}
+
+            {feishuPhase === 'success' && (
+              <div className="space-y-3 text-center py-6">
+                <CheckCircle size={36} className="mx-auto text-accent-green" />
+                <p className="text-sm text-dark-text">{feishuMsg}</p>
+                <button
+                  onClick={closeFeishuGuide}
+                  className="rounded-lg border border-dark-border px-4 py-1.5 text-sm text-dark-text-secondary hover:text-dark-text transition-colors"
+                >
+                  完成
+                </button>
+              </div>
+            )}
+
+            {feishuPhase === 'error' && (
+              <div className="space-y-3 text-center py-6">
+                <AlertCircle size={36} className="mx-auto text-accent-red" />
+                <p className="text-sm text-accent-red">{feishuMsg || '接入失败'}</p>
+                <button
+                  onClick={startFeishuOnboard}
+                  className="rounded-lg bg-accent-blue px-4 py-1.5 text-sm font-medium text-white hover:bg-accent-blue/90 transition-colors"
+                >
+                  重新接入
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

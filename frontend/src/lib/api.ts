@@ -943,6 +943,46 @@ export async function restartGateway(): Promise<{ success: boolean; message: str
   })
 }
 
+export async function restartUserContainer(): Promise<{ success: boolean; restarted: boolean }> {
+  return fetchJSON<{ success: boolean; restarted: boolean }>('/api/openclaw/container/restart', {
+    method: 'POST',
+  })
+}
+
+export interface FeishuOnboardBegin {
+  qr_url: string
+  device_code: string
+  interval: number
+  expire_in: number
+  domain: string
+}
+
+export async function feishuOnboardBegin(): Promise<FeishuOnboardBegin> {
+  return fetchJSON<FeishuOnboardBegin>('/api/openclaw/feishu/onboard/begin', { method: 'POST' })
+}
+
+export interface FeishuOnboardPoll {
+  status: 'pending' | 'success' | 'access_denied' | 'expired_token'
+  app_id?: string
+  app_secret?: string
+  domain?: string
+  error?: string
+}
+
+export async function feishuOnboardPoll(device_code: string, domain: string): Promise<FeishuOnboardPoll> {
+  return fetchJSON<FeishuOnboardPoll>('/api/openclaw/feishu/onboard/poll', {
+    method: 'POST',
+    body: JSON.stringify({ device_code, domain }),
+  })
+}
+
+export async function feishuOnboardCommit(app_id: string, app_secret: string, domain: string): Promise<{ success: boolean; restarted: boolean }> {
+  return fetchJSON<{ success: boolean; restarted: boolean }>('/api/openclaw/feishu/onboard/commit', {
+    method: 'POST',
+    body: JSON.stringify({ app_id, app_secret, domain }),
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Plugins / Extensions
 // ---------------------------------------------------------------------------
