@@ -452,7 +452,6 @@ def show_status(compose_file: str, host: str, gateway_port: int, frontend_port: 
     print(f"  用户前端:        http://{host}:{frontend_port}")
     print(f"  简化版前端:      http://{host}:{simple_port}")
     print(f"  管理员前端:      http://{host}:3081")
-    print(f"  共享Hermes(API): http://{host}:8080")
     print(f"  platform网关:    http://{host}:{gateway_port}")
     print(f"  使用的compose文件: {compose_file}")
     print(f"{'=' * 50}\n")

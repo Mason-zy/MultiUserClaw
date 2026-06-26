@@ -419,7 +419,7 @@ def _hermes_empty_compat(path: str, request: Request) -> JSONResponse | None:
         return JSONResponse({"ok": False, "runtime": "hermes", "detail": "Hermes model config is controlled by platform environment variables"})
     if path == "filemanager/browse" and request.method == "GET":
         requested_path = request.query_params.get("path", "")
-        return JSONResponse({"type": "directory", "path": requested_path, "root": "/opt/data", "items": [], "runtime": "hermes"})
+        return JSONResponse({"type": "directory", "path": requested_path, "root": "/", "items": [], "runtime": "hermes"})
     if path in {"filemanager/delete", "filemanager/mkdir"} and request.method in {"DELETE", "POST"}:
         return JSONResponse({"ok": False, "runtime": "hermes", "detail": "Hermes file mutation is limited to upload and serve compatibility endpoints"})
     return None

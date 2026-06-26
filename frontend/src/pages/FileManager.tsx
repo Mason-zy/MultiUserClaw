@@ -22,7 +22,7 @@ import {
 import type { FileEntry, BrowseResult } from '../lib/api'
 
 export default function FileManager() {
-  const [currentPath, setCurrentPath] = useState('')
+  const [currentPath, setCurrentPath] = useState('/')
   const [data, setData] = useState<BrowseResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -77,15 +77,15 @@ export default function FileManager() {
     }
   }
 
-  useEffect(() => { loadDir('') }, [])
+  useEffect(() => { loadDir('/') }, [])
 
   const navigateTo = (dirPath: string) => {
-    loadDir(dirPath)
+    loadDir(dirPath || '/')
   }
 
   const goUp = () => {
-    if (!currentPath) return
-    const parent = currentPath.split('/').slice(0, -1).join('/')
+    if (currentPath === '/' || !currentPath) return
+    const parent = currentPath.replace(/\/[^/]+$/, '') || '/'
     navigateTo(parent)
   }
 
@@ -143,7 +143,7 @@ export default function FileManager() {
     if (!newFolderName.trim()) return
     setError('')
     try {
-      const folderPath = currentPath ? `${currentPath}/${newFolderName.trim()}` : newFolderName.trim()
+      const folderPath = currentPath === '/' ? `/${newFolderName.trim()}` : `${currentPath}/${newFolderName.trim()}`
       await createDirectory(folderPath)
       setShowNewFolder(false)
       setNewFolderName('')
@@ -174,7 +174,7 @@ export default function FileManager() {
     }
   }
 
-  const breadcrumbs = currentPath ? currentPath.split('/') : []
+  const breadcrumbs = currentPath === '/' ? [] : currentPath.split('/').filter(Boolean)
 
   const formatSize = (bytes: number | null) => {
     if (bytes === null) return ''
@@ -201,7 +201,7 @@ export default function FileManager() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-dark-text">文件管理</h1>
         <p className="mt-1 text-sm text-dark-text-secondary">
-          浏览和管理 {data?.root || '~/.openclaw'} 目录
+          浏览和管理 {data?.root || '/'} 目录
         </p>
       </div>
 
@@ -214,13 +214,13 @@ export default function FileManager() {
         {/* Breadcrumb */}
         <div className="flex items-center gap-1 text-sm">
           <button
-            onClick={() => navigateTo('')}
+            onClick={() => navigateTo('/')}
             className="flex items-center gap-1 text-dark-text-secondary hover:text-accent-blue transition-colors"
           >
             <Home size={15} />
           </button>
           {breadcrumbs.map((seg, i) => {
-            const segPath = breadcrumbs.slice(0, i + 1).join('/')
+            const segPath = '/' + breadcrumbs.slice(0, i + 1).join('/')
             const isLast = i === breadcrumbs.length - 1
             return (
               <span key={segPath} className="flex items-center gap-1">
@@ -242,7 +242,7 @@ export default function FileManager() {
 
         {/* Actions */}
         <div className="flex items-center gap-2">
-          {currentPath && (
+          {currentPath !== '/' && (
             <button
               onClick={goUp}
               className="flex items-center gap-1 rounded-lg border border-dark-border px-3 py-1.5 text-xs text-dark-text-secondary hover:text-dark-text transition-colors"

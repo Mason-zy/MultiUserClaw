@@ -18,6 +18,7 @@ from app.runtime_backends.hermes_agents import (
 from app.runtime_backends.hermes_files import (
     browse_hermes_filemanager,
     delete_hermes_filemanager_path,
+    is_hermes_absolute_request,
     make_hermes_filemanager_directory,
     normalize_hermes_filemanager_path,
 )
@@ -359,10 +360,12 @@ async def upload_dedicated_file(
     user: User = Depends(get_current_user),
 ):
     backend = get_runtime_backend()
+    raw_target = path or upload_dir
+    target_dir = raw_target if is_hermes_absolute_request(raw_target) else normalize_hermes_filemanager_path(raw_target)
     return await backend.upload_file(
         RuntimeContext(user=user, scope="dedicated"),
         file,
-        target_dir=normalize_hermes_filemanager_path(path or upload_dir),
+        target_dir=target_dir,
     )
 
 

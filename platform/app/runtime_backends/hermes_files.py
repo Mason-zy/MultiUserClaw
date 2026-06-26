@@ -134,6 +134,23 @@ def normalize_hermes_filemanager_path(requested_path: str | None) -> str:
     return _normalize_profile_storage_path(raw)
 
 
+def is_hermes_absolute_request(requested_path: str | None) -> bool:
+    """Whether a file-manager path should be treated as an absolute container path.
+
+    Absolute requests (starting with ``/``) browse the whole container filesystem
+    rooted at ``/``. Relative requests keep the legacy ``/opt/data`` profile layout.
+    """
+    return (requested_path or "").strip().startswith("/")
+
+
+def normalize_hermes_absolute_path(requested_path: str | None) -> str:
+    raw = (requested_path or "/").strip().replace("\\", "/")
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    normalized = posixpath.normpath(raw)
+    return normalized or "/"
+
+
 def normalize_hermes_read_path(requested_path: str | None) -> str:
     raw = (requested_path or "").strip().replace("\\", "/")
     if not raw:
@@ -165,6 +182,9 @@ def normalize_hermes_read_path(requested_path: str | None) -> str:
             or normalized.startswith("/opt/hermes/")
         ):
             return normalized
+        # Any other absolute path is served as-is so the file manager can
+        # download files from anywhere in the container filesystem.
+        return normalized
     else:
         raw = raw.lstrip("/")
         normalized = posixpath.normpath(raw)
@@ -260,13 +280,86 @@ print(json.dumps(payload))
 """
 
 
+def _filemanager_root_script() -> str:
+    return r"""
+import json
+import mimetypes
+import os
+import sys
+from datetime import datetime, timezone
+
+target = os.path.realpath(sys.argv[1] or "/")
+
+def fail(code, detail):
+    print(json.dumps({"detail": detail}))
+    raise SystemExit(code)
+
+if not os.path.exists(target):
+    fail(4, "Hermes file not found")
+
+def iso(ts):
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+def entry_for(path):
+    stat = os.stat(path)
+    is_dir = os.path.isdir(path)
+    content_type = None if is_dir else (mimetypes.guess_type(path)[0] or "application/octet-stream")
+    return {
+        "name": os.path.basename(path) or path,
+        "path": path,
+        "type": "directory" if is_dir else "file",
+        "size": None if is_dir else stat.st_size,
+        "content_type": content_type,
+        "modified": iso(stat.st_mtime),
+    }
+
+if os.path.isdir(target):
+    items = []
+    for name in sorted(os.listdir(target)):
+        full = os.path.join(target, name)
+        try:
+            items.append(entry_for(full))
+        except OSError:
+            continue
+    items.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
+    payload = {
+        "type": "directory",
+        "path": target,
+        "root": "/",
+        "items": items,
+        "runtime": "hermes",
+    }
+else:
+    stat = os.stat(target)
+    content_type = mimetypes.guess_type(target)[0] or "application/octet-stream"
+    payload = {
+        "type": "file",
+        "path": target,
+        "name": os.path.basename(target),
+        "size": stat.st_size,
+        "content_type": content_type,
+        "modified": iso(stat.st_mtime),
+        "runtime": "hermes",
+    }
+    text_exts = {".csv", ".json", ".jsonl", ".log", ".md", ".py", ".sh", ".toml", ".ts", ".txt", ".xml", ".yaml", ".yml"}
+    ext = os.path.splitext(target)[1].lower()
+    if stat.st_size <= 1024 * 1024 and (content_type.startswith("text/") or content_type == "application/json" or ext in text_exts):
+        try:
+            with open(target, "r", encoding="utf-8", errors="replace") as fh:
+                payload["content"] = fh.read()
+        except OSError:
+            pass
+
+print(json.dumps(payload))
+"""
+
+
 def browse_hermes_filemanager(container_id_or_name: str | None, requested_path: str | None) -> dict:
     if not container_id_or_name:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hermes runtime container is unavailable",
         )
-    storage_path = normalize_hermes_filemanager_path(requested_path)
     try:
         container = get_docker_container(container_id_or_name)
     except DockerNotFound as exc:
@@ -275,7 +368,12 @@ def browse_hermes_filemanager(container_id_or_name: str | None, requested_path: 
             detail="Hermes runtime container is unavailable",
         ) from exc
 
-    result = container.exec_run(["python3", "-c", _filemanager_script(), storage_path])
+    if is_hermes_absolute_request(requested_path):
+        absolute_path = normalize_hermes_absolute_path(requested_path)
+        result = container.exec_run(["python3", "-c", _filemanager_root_script(), absolute_path])
+    else:
+        storage_path = normalize_hermes_filemanager_path(requested_path)
+        result = container.exec_run(["python3", "-c", _filemanager_script(), storage_path])
     exit_code, output = _exec_output(result)
     if exit_code == 4:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Hermes file not found")
@@ -299,7 +397,13 @@ def make_hermes_filemanager_directory(container_id_or_name: str | None, requeste
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hermes runtime container is unavailable",
         )
-    storage_path = normalize_hermes_filemanager_path(requested_path)
+    if is_hermes_absolute_request(requested_path):
+        absolute_path = normalize_hermes_absolute_path(requested_path)
+        result_path = absolute_path
+    else:
+        storage_path = normalize_hermes_filemanager_path(requested_path)
+        absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
+        result_path = storage_path
     try:
         container = get_docker_container(container_id_or_name)
     except DockerNotFound as exc:
@@ -307,7 +411,6 @@ def make_hermes_filemanager_directory(container_id_or_name: str | None, requeste
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hermes runtime container is unavailable",
         ) from exc
-    absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
     result = container.exec_run(["sh", "-lc", f"mkdir -p -- {shlex.quote(absolute_path)}"], user=HERMES_USER)
     exit_code, output = _exec_output(result)
     if exit_code != 0:
@@ -319,7 +422,7 @@ def make_hermes_filemanager_directory(container_id_or_name: str | None, requeste
                 detail=output.decode("utf-8", errors="replace") or "Failed to create Hermes directory",
             )
     chown_hermes_path(container, absolute_path)
-    return {"ok": True, "path": storage_path, "runtime": "hermes"}
+    return {"ok": True, "path": result_path, "runtime": "hermes"}
 
 
 def write_hermes_filemanager_file(container_id_or_name: str | None, requested_path: str | None, content: str) -> dict:
@@ -359,9 +462,17 @@ def delete_hermes_filemanager_path(container_id_or_name: str | None, requested_p
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hermes runtime container is unavailable",
         )
-    storage_path = normalize_hermes_filemanager_path(requested_path)
-    if storage_path.endswith("/workspace") or storage_path == "profiles/main/workspace":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete Hermes workspace root")
+    if is_hermes_absolute_request(requested_path):
+        absolute_path = normalize_hermes_absolute_path(requested_path)
+        if absolute_path == "/":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete the filesystem root")
+        result_path = absolute_path
+    else:
+        storage_path = normalize_hermes_filemanager_path(requested_path)
+        if storage_path.endswith("/workspace") or storage_path == "profiles/main/workspace":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete Hermes workspace root")
+        absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
+        result_path = storage_path
     try:
         container = get_docker_container(container_id_or_name)
     except DockerNotFound as exc:
@@ -369,7 +480,6 @@ def delete_hermes_filemanager_path(container_id_or_name: str | None, requested_p
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hermes runtime container is unavailable",
         ) from exc
-    absolute_path = f"{HERMES_DATA_ROOT}/{storage_path}"
     result = container.exec_run(["sh", "-lc", f"rm -rf -- {shlex.quote(absolute_path)}"])
     exit_code, output = _exec_output(result)
     if exit_code != 0:
@@ -377,7 +487,7 @@ def delete_hermes_filemanager_path(container_id_or_name: str | None, requested_p
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=output.decode("utf-8", errors="replace") or "Failed to delete Hermes path",
         )
-    return {"ok": True, "path": storage_path, "runtime": "hermes"}
+    return {"ok": True, "path": result_path, "runtime": "hermes"}
 
 
 def _legacy_script_fallback_path(container, requested_path: str) -> str | None:
@@ -471,6 +581,25 @@ def _build_upload_archive(relative_path: str, contents: bytes) -> bytes:
     return tar_buffer.read()
 
 
+def _build_plain_archive(relative_path: str, contents: bytes) -> bytes:
+    """Build a tar containing only the uploaded file, extracted relative to ``/``.
+
+    Unlike ``_build_upload_archive`` this does not add parent directory members,
+    so extracting at the filesystem root never rewrites ownership of existing
+    system directories. The target directory must already exist.
+    """
+    tar_buffer = io.BytesIO()
+    now = int(time.time())
+    with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+        upload_file = tarfile.TarInfo(name=relative_path)
+        upload_file.size = len(contents)
+        upload_file.mode = 0o644
+        upload_file.mtime = now
+        tar.addfile(_mark_hermes_owned(upload_file), io.BytesIO(contents))
+    tar_buffer.seek(0)
+    return tar_buffer.read()
+
+
 def _ensure_openclaw_compat_links(container) -> None:
     result = container.exec_run(
         [
@@ -503,6 +632,37 @@ async def write_upload_to_hermes_container(
     contents = await file.read()
     original_name = _safe_filename(file.filename)
     stored_name = f"{int(time.time() * 1000)}-{original_name}"
+
+    if is_hermes_absolute_request(target_dir):
+        absolute_dir = normalize_hermes_absolute_path(target_dir)
+        absolute_path = posixpath.join(absolute_dir, stored_name)
+        archive = _build_plain_archive(absolute_path.lstrip("/"), contents)
+        try:
+            container = get_docker_container(container_id_or_name)
+            ok = container.put_archive("/", archive)
+        except DockerNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hermes runtime container is unavailable",
+            ) from exc
+        except DockerAPIError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to write upload into Hermes container",
+            ) from exc
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to write upload into Hermes container",
+            )
+        return {
+            "path": absolute_path,
+            "name": stored_name,
+            "original_name": original_name,
+            "size": len(contents),
+            "content_type": file.content_type or "application/octet-stream",
+        }
+
     upload_dir = normalize_hermes_upload_dir(target_dir)
     relative_path = f"{upload_dir}/{stored_name}"
     archive = _build_upload_archive(relative_path, contents)
@@ -588,9 +748,14 @@ def read_file_from_hermes_container(
 
     archive = b"".join(stream)
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as tar:
-        files = [m for m in tar.getmembers() if m.isfile()]
+        members = tar.getmembers()
+        files = [m for m in members if m.isfile()]
+        # A directory download always carries a directory member in the tar;
+        # only a genuine single-file download (no directory member) should be
+        # returned raw, otherwise a single-file directory must still be zipped.
+        is_directory = any(m.isdir() for m in members)
 
-        if len(files) == 1:
+        if not is_directory and len(files) == 1:
             extracted = tar.extractfile(files[0])
             if extracted is not None:
                 media_type = mimetypes.guess_type(media_path)[0] or "application/octet-stream"
