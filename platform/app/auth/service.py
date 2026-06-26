@@ -175,3 +175,48 @@ async def authenticate_user_with_reason(
     if not verify_password(password, user.password_hash):
         return None, AuthFailureReason.PASSWORD_INCORRECT
     return user, None
+
+
+# ---------------------------------------------------------------------------
+# Feishu SSO user mapping (TASK-1, zero-intrusion addition)
+# ---------------------------------------------------------------------------
+# 刻意独立于 create_or_update_sso_user（InfoX-Med 专用），只追加不改原函数，
+# 便于与上游作者 push 合并。逻辑略有重复（~20 行）是有意代价。
+
+def _random_password() -> str:
+    import secrets
+
+    return secrets.token_urlsafe(16)
+
+
+async def get_or_create_feishu_user(
+    db: AsyncSession,
+    *,
+    sso_uid: str,
+    display_name: str,
+    email: str,
+) -> User:
+    """飞书 SSO 专用：按 sso_uid 查/建用户。
+
+    ``sso_uid`` 需已带 ``feishu:`` 前缀（与未来其他 IdP 区分）。新用户用飞书
+    name 作 username、飞书 email 作 email，随机密码占位（沿用现有骨架策略）。
+    """
+    user = await get_user_by_sso_uid(db, sso_uid)
+    if user is not None:
+        return user
+
+    username = display_name or sso_uid
+    # 沿用现有 get_user_by_username 做唯一性兜底（冲突追加后缀）
+    existing = await get_user_by_username(db, username)
+    if existing is not None:
+        username = f"{username}_{sso_uid[-6:]}"
+
+    user = User(
+        sso_uid=sso_uid,
+        username=username,
+        email=email or f"{sso_uid}@feishu.sso",
+        password_hash=hash_password(_random_password()),
+    )
+    db.add(user)
+    await db.flush()
+    return user
