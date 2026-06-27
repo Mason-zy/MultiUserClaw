@@ -245,7 +245,7 @@ def _hermes_api_toolsets() -> list[str]:
     return [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
 
 
-def _build_hermes_env_file() -> str:
+def _build_hermes_env_file(preserve_vars: dict | None = None) -> str:
     lines = [
         f"API_SERVER_KEY={settings.dedicated_hermes_api_key}",
         "GATEWAY_ALLOW_ALL_USERS=true",
@@ -256,6 +256,11 @@ def _build_hermes_env_file() -> str:
     default_api_key = (settings.dedicated_hermes_default_api_key or "").strip()
     if default_api_key:
         lines.append(f"OPENAI_API_KEY={default_api_key}")
+    # Preserve messaging-channel vars (FEISHU_*, TELEGRAM_*, ...) configured via
+    # the web onboarding flow / `hermes gateway setup`, so rebuilding the user
+    # container does not wipe channel credentials.
+    for key, value in (preserve_vars or {}).items():
+        lines.append(f"{key}={value}")
     return "\n".join(lines) + "\n"
 
 
@@ -418,6 +423,36 @@ def _read_existing_hermes_config(container: docker.models.containers.Container) 
     return {}
 
 
+# Messaging-channel env prefixes managed by the web onboarding flow / hermes
+# gateway setup (not by the platform). These must survive container rebuilds or
+# channel credentials configured by the user are lost.
+_CHANNEL_ENV_PREFIXES = (
+    "FEISHU_", "LARK_", "TELEGRAM_", "DISCORD_", "SLACK_", "WHATSAPP_",
+    "MATRIX_", "MATTERMOST_", "WEIXIN_", "WECOM_", "DINGTALK_", "SIGNAL_",
+    "IRC_", "NOSTR_", "TWITCH_", "ZALO_", "QQBOT_", "GOOGLECHAT_", "MSTEAMS_",
+)
+
+
+def _read_existing_hermes_env_channel_vars(container: docker.models.containers.Container) -> dict:
+    """Read channel-related env vars from existing /opt/data/.env so they survive a rebuild."""
+    try:
+        result = container.exec_run(["cat", "/opt/data/.env"], user="root")
+    except Exception:
+        return {}
+    if getattr(result, "exit_code", 1) != 0 or not result.output:
+        return {}
+    preserved: dict = {}
+    for raw_line in result.output.decode("utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith(_CHANNEL_ENV_PREFIXES):
+            preserved[key] = value.strip()
+    return preserved
+
+
 def _write_hermes_runtime_files(container: docker.models.containers.Container) -> None:
     platform_config = yaml.safe_load(_build_hermes_config_yaml()) or {}
     existing_config = _read_existing_hermes_config(container)
@@ -444,7 +479,9 @@ def _write_hermes_runtime_files(container: docker.models.containers.Container) -
         platform_config["model"].pop("base_url", None)
 
     config_content = yaml.safe_dump(platform_config, allow_unicode=True, sort_keys=False).encode("utf-8")
-    env_content = _build_hermes_env_file().encode("utf-8")
+    env_content = _build_hermes_env_file(
+        _read_existing_hermes_env_channel_vars(container)
+    ).encode("utf-8")
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
         config_file = tarfile.TarInfo(name="config.yaml")
