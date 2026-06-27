@@ -97,10 +97,10 @@ browser:
 
 当某工具的 `use_gateway: true` 时，运行时会把 API 调用路由到 Nous Tool Gateway，而不是使用直连 Key：
 
-1. **网页工具** — `web_search` / `web_extract` 走网关的 Firecrawl 端点
-2. **文生图** — `image_generate` 走网关的 FAL 端点
-3. **TTS** — `text_to_speech` 走网关的 OpenAI Audio 端点
-4. **浏览器** — `browser_navigate` 等走网关的 Browser Use 端点
+1. **网页工具** — `web_search` / `web_extract` 走网关的 Firecrawl 端点  
+2. **文生图** — `image_generate` 走网关的 FAL 端点  
+3. **TTS** — `text_to_speech` 走网关的 OpenAI Audio 端点  
+4. **浏览器** — `browser_navigate` 等走网关的 Browser Use 端点  
 
 网关使用 Nous Portal 凭据认证（在 `hermes model` 完成后写入 `~/.hermes/auth.json`）。
 
@@ -108,8 +108,8 @@ browser:
 
 每个工具都会先看 `use_gateway`：
 
-- **`use_gateway: true`** → 强制走网关，即使 `.env` 里仍有直连 Key
-- **`use_gateway: false`**（或未设置）→ 若有直连 Key 则优先直连；仅在没有直连凭据时才回退到网关
+- **`use_gateway: true`** → 强制走网关，即使 `.env` 里仍有直连 Key  
+- **`use_gateway: false`**（或未设置）→ 若有直连 Key 则优先直连；仅在没有直连凭据时才回退到网关  
 
 因此你可以在网关与直连之间切换，而无需删除 `.env` 中的旧 Key。
 

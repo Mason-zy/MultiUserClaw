@@ -6,7 +6,6 @@ so each gateway user gets their own memory bucket instead of sharing a static on
 
 import json
 import os
-import pytest
 from unittest.mock import MagicMock, patch
 
 from agent.memory_provider import MemoryProvider
@@ -356,3 +355,4 @@ class TestAIAgentUserIdPropagation:
             agent = object.__new__(AIAgent)
             agent._user_id = None
             assert agent._user_id is None
+

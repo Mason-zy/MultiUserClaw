@@ -7,7 +7,6 @@ for the full command timeout before surfacing a useless error.
 """
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -116,3 +115,5 @@ class TestRunBrowserCommandChromiumGuard:
     """Verify _run_browser_command fails fast (no timeout hang) when
     Chromium is missing in local mode.
     """
+
+

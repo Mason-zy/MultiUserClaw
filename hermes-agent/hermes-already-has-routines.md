@@ -99,7 +99,7 @@ One automation, any destination:
 
 ```bash
 --deliver telegram                      # Telegram home channel
---deliver discord                       # Discord home channel
+--deliver discord                       # Discord home channel  
 --deliver slack                         # Slack channel
 --deliver sms:+15551234567              # Text message
 --deliver telegram:-1001234567890:42    # Specific Telegram forum topic
@@ -127,7 +127,7 @@ A nightly backlog triage on Sonnet costs roughly $0.02-0.05. A monitoring check 
 Hermes Agent is open source and free. The automation infrastructure — cron scheduler, webhook platform, skill system, multi-platform delivery — is built in.
 
 ```bash
-pip install hermes-agent
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 hermes setup
 ```
 
@@ -149,7 +149,7 @@ hermes webhook subscribe pr-review \
   --deliver github_comment
 ```
 
-Full automation templates gallery: [hermes-agent.nousresearch.com/docs/guides/automation-templates](https://hermes-agent.nousresearch.com/docs/guides/automation-templates)
+Full automation blueprints gallery: [hermes-agent.nousresearch.com/docs/reference/automation-blueprints-catalog](https://hermes-agent.nousresearch.com/docs/reference/automation-blueprints-catalog)
 
 Documentation: [hermes-agent.nousresearch.com](https://hermes-agent.nousresearch.com)
 

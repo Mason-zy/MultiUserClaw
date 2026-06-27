@@ -139,3 +139,4 @@ class TestMaxTokensRetryHardening:
                 )
 
         assert client.chat.completions.create.call_count == 1
+

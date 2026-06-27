@@ -1,9 +1,8 @@
 """Tests for interrupt handling in concurrent tool execution."""
 
-import concurrent.futures
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -143,3 +142,4 @@ def test_clear_interrupt_clears_worker_tids(monkeypatch):
         "clear_interrupt() did not clear the interrupt bit for a tracked "
         "worker tid — stale interrupt can leak into the next turn"
     )
+
