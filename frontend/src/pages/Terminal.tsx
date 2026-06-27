@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertCircle, Monitor, Plug, PlugZap, TerminalSquare, Trash2 } from 'lucide-react'
+import { AlertCircle, Monitor, Plug, PlugZap, Trash2 } from 'lucide-react'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
 import { getAccessToken } from '../lib/api'
 
 function base64UrlDecode(value: string): string {
@@ -21,112 +24,116 @@ function getTokenSubject(token: string): string {
 }
 
 function getTerminalSessionKey(token: string): string {
-  const sub = getTokenSubject(token)
-  return `terminal:${window.location.host}:${sub}`
+  return `terminal:${window.location.host}:${getTokenSubject(token)}`
 }
 
 export default function TerminalPage() {
-  const [termConnected, setTermConnected] = useState(false)
-  const [termOutput, setTermOutput] = useState('')
-  const [termInput, setTermInput] = useState('')
   const [termCommand, setTermCommand] = useState('bash -il')
-  const [termWs, setTermWs] = useState<WebSocket | null>(null)
+  const [termConnected, setTermConnected] = useState(false)
   const [error, setError] = useState('')
-  const outputRef = useRef<HTMLDivElement | null>(null)
-  const connectingRef = useRef(false)
-
-  useEffect(() => {
-    if (!outputRef.current) return
-    outputRef.current.scrollTop = outputRef.current.scrollHeight
-  }, [termOutput])
-
-  useEffect(() => {
-    return () => {
-      if (termWs) {
-        try { termWs.close() } catch { /* ignore */ }
-      }
-    }
-  }, [termWs])
+  const containerRef = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const commandRef = useRef(termCommand)
+  commandRef.current = termCommand
 
   const connectTerminal = () => {
-    if (connectingRef.current) return
-    if (termWs && (termWs.readyState === WebSocket.OPEN || termWs.readyState === WebSocket.CONNECTING)) return
-
+    const existing = wsRef.current
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return
     const token = getAccessToken()
     if (!token) {
       setError('未登录或 token 已失效')
       return
     }
-
+    setError('')
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const wsUrl = `${proto}://${window.location.host}/api/openclaw/terminal/ws?token=${encodeURIComponent(token)}`
-    const ws = new WebSocket(wsUrl)
-    const sessionKey = getTerminalSessionKey(token)
-    connectingRef.current = true
+    const ws = new WebSocket(`${proto}://${window.location.host}/api/openclaw/terminal/ws?token=${encodeURIComponent(token)}`)
+    wsRef.current = ws
 
     ws.onopen = () => {
-      connectingRef.current = false
       setTermConnected(true)
-      setTermOutput((prev) => `${prev}\n[connected] terminal websocket connected\n`)
       ws.send(JSON.stringify({
         type: 'init',
-        session_key: sessionKey,
-        command: termCommand,
+        session_key: getTerminalSessionKey(token),
+        command: commandRef.current,
       }))
     }
-
-    ws.onclose = () => {
-      connectingRef.current = false
-      setTermConnected(false)
-      setTermOutput((prev) => `${prev}\n[disconnected] terminal websocket closed\n`)
-    }
-
-    ws.onerror = () => {
-      connectingRef.current = false
-      setTermOutput((prev) => `${prev}\n[error] websocket error\n`)
-    }
-
     ws.onmessage = (evt) => {
+      const term = termRef.current
+      if (!term) return
       try {
         const msg = JSON.parse(String(evt.data))
         if (msg.type === 'output') {
-          setTermOutput((prev) => prev + String(msg.data ?? ''))
+          term.write(String(msg.data ?? ''))
         } else if (msg.type === 'session') {
-          const reused = Boolean(msg.reused)
-          const key = String(msg.session_key ?? '')
-          setTermOutput((prev) => `${prev}[session] ${key || 'unknown'} ${reused ? '(reused)' : '(new)'}\n`)
+          term.write(`\r\n[session] ${String(msg.session_key ?? '')} ${msg.reused ? '(reused)' : '(new)'}\r\n`)
         } else if (msg.type === 'started') {
-          setTermOutput((prev) => `${prev}[started] ${String(msg.command ?? '')}\n`)
+          term.write(`[started] ${String(msg.command ?? '')}\r\n`)
         } else if (msg.type === 'exit') {
-          setTermOutput((prev) => `${prev}\n[exit] code=${String(msg.code)} signal=${String(msg.signal)}\n`)
+          term.write(`\r\n[exit] code=${String(msg.code)} signal=${String(msg.signal)}\r\n`)
         } else if (msg.type === 'error') {
-          setTermOutput((prev) => `${prev}\n[error] ${String(msg.message)}\n`)
+          term.write(`\r\n[error] ${String(msg.message ?? '')}\r\n`)
         }
       } catch {
-        setTermOutput((prev) => prev + String(evt.data))
+        term.write(String(evt.data))
       }
     }
-
-    setTermWs(ws)
+    ws.onclose = () => {
+      setTermConnected(false)
+      termRef.current?.write('\r\n[disconnected] terminal websocket closed\r\n')
+    }
+    ws.onerror = () => {
+      termRef.current?.write('\r\n[error] websocket error\r\n')
+    }
   }
 
   const disconnectTerminal = () => {
-    if (!termWs) return
-    try { termWs.close() } catch { /* ignore */ }
-    connectingRef.current = false
-    setTermWs(null)
+    const ws = wsRef.current
+    if (!ws) return
+    try { ws.close() } catch { /* ignore */ }
+    wsRef.current = null
     setTermConnected(false)
   }
 
-  const sendTerminalInput = () => {
-    if (!termWs || termWs.readyState !== WebSocket.OPEN || !termInput) return
-    termWs.send(JSON.stringify({ type: 'input', data: `${termInput}\n` }))
-    setTermInput('')
-  }
-
   useEffect(() => {
-    if (!termConnected && (!termWs || termWs.readyState === WebSocket.CLOSED)) {
-      connectTerminal()
+    const container = containerRef.current
+    if (!container) return
+    const term = new Terminal({
+      fontSize: 13,
+      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      theme: { background: '#000000', foreground: '#b5e8b5', cursor: '#b5e8b5' },
+      cursorBlink: true,
+      scrollback: 5000,
+    })
+    const fit = new FitAddon()
+    term.loadAddon(fit)
+    term.open(container)
+    termRef.current = term
+
+    // Keyboard input → PTY (arrows, enter, ctrl-c, tab, ... all flow through)
+    term.onData((data) => {
+      const ws = wsRef.current
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'input', data }))
+      }
+    })
+
+    const doFit = () => { try { fit.fit() } catch { /* ignore */ } }
+    doFit()
+    const resizeObserver = new ResizeObserver(doFit)
+    resizeObserver.observe(container)
+    window.addEventListener('resize', doFit)
+
+    // auto-connect on mount
+    connectTerminal()
+
+    return () => {
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', doFit)
+      try { wsRef.current?.close() } catch { /* ignore */ }
+      wsRef.current = null
+      term.dispose()
+      termRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -135,7 +142,7 @@ export default function TerminalPage() {
     <div className="flex h-[calc(100vh-7.5rem)] flex-col">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-dark-text">实时终端</h1>
-        <p className="mt-1 text-sm text-dark-text-secondary">连接用户容器并实时执行交互命令</p>
+        <p className="mt-1 text-sm text-dark-text-secondary">完整终端（xterm.js + PTY），支持方向键、Tab 补全、TUI 向导（vi/top/htop）。直接在此输入命令即可。</p>
       </div>
 
       {error && (
@@ -149,7 +156,7 @@ export default function TerminalPage() {
         <div className="px-5 py-3 border-b border-dark-border flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Monitor size={16} className="text-dark-text-secondary" />
-            <h2 className="text-sm font-semibold text-dark-text">实时终端（WS + PTY）</h2>
+            <h2 className="text-sm font-semibold text-dark-text">实时终端（xterm.js + PTY）</h2>
           </div>
           <span className={`text-xs ${termConnected ? 'text-accent-green' : 'text-dark-text-secondary'}`}>
             {termConnected ? '已连接' : '未连接'}
@@ -178,38 +185,16 @@ export default function TerminalPage() {
             >
               <PlugZap size={14} /> 断开
             </button>
-          </div>
-
-          <div
-            ref={outputRef}
-            className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-dark-border bg-black p-3 font-mono text-xs text-green-200"
-          >
-            {termOutput || '等待连接...'}
-          </div>
-
-          <div className="flex items-center gap-2">
-            <TerminalSquare size={14} className="text-dark-text-secondary" />
-            <input
-              value={termInput}
-              onChange={e => setTermInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') sendTerminalInput() }}
-              className="flex-1 rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-dark-text focus:border-accent-blue focus:outline-none"
-              placeholder="输入命令并回车发送"
-            />
             <button
-              onClick={sendTerminalInput}
-              className="rounded-lg border border-dark-border px-3 py-2 text-xs text-dark-text-secondary hover:text-dark-text"
-            >
-              发送
-            </button>
-            <button
-              onClick={() => setTermOutput('')}
+              onClick={() => termRef.current?.clear()}
               className="inline-flex items-center gap-1 rounded-lg border border-dark-border px-3 py-2 text-xs text-dark-text-secondary hover:text-dark-text"
-              title="清空输出"
+              title="清屏"
             >
-              <Trash2 size={14} /> 清空
+              <Trash2 size={14} /> 清屏
             </button>
           </div>
+
+          <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden rounded-lg border border-dark-border bg-black p-2" />
         </div>
       </section>
     </div>
