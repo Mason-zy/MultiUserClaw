@@ -98,6 +98,9 @@ print(json.dumps(skills, ensure_ascii=False))
 """
 
 _RESOLVE_SKILL_SCRIPT = r"""
+import os
+from pathlib import Path
+
 def clean_scalar(value):
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
