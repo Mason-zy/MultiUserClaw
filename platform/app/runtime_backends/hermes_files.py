@@ -161,6 +161,9 @@ def normalize_hermes_read_path(requested_path: str | None) -> str:
     raw = raw.removeprefix("~/.openclaw/")
     raw = raw.removeprefix("/root/.openclaw/")
     raw = raw.removeprefix("root/.openclaw/")
+    # workspace 相对路径（agent 引用 workspace/uploads/xxx）补 /，走下方 /workspace → profiles/main 映射
+    if not raw.startswith("/") and (raw.startswith("workspace") or raw.startswith("workspace-")):
+        raw = "/" + raw
     if raw.startswith("/"):
         normalized = posixpath.normpath(raw)
         if normalized == "/workspace" or normalized.startswith("/workspace/"):
