@@ -26,6 +26,7 @@ from app.runtime_backends.hermes_skills import (
     delete_skill_from_hermes_container,
     download_skill_from_hermes_container,
     list_skills_from_hermes_container,
+    set_skill_disabled_in_hermes_container,
     upload_skill_zip_to_hermes_container,
 )
 from app.runtime_backends.skills_marketplace import load_recommended_skills, resolve_recommended_skill_dir
@@ -45,6 +46,10 @@ class SendMessageRequest(BaseModel):
 class SkillSearchRequest(BaseModel):
     query: str = ""
     limit: int = 10
+
+
+class SkillToggleRequest(BaseModel):
+    enabled: bool = True
 
 
 class SharedChatRequest(BaseModel):
@@ -148,6 +153,19 @@ async def download_dedicated_skill(
         content=zip_data,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{name.rsplit("/", 1)[-1]}.zip"'},
+    )
+
+
+@router.put("/api/openclaw/skills/{name:path}/toggle")
+async def toggle_dedicated_skill(
+    name: str,
+    req: SkillToggleRequest,
+    user: User = Depends(get_current_user),
+):
+    async with async_session() as db:
+        container = await ensure_running(db, user.id)
+    return set_skill_disabled_in_hermes_container(
+        container.docker_id, name, disabled=not req.enabled
     )
 
 
