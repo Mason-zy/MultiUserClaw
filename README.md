@@ -384,7 +384,7 @@ python prepare.py
 
 # === Docker 部署（推荐） ===
 
-# 本地 Docker 部署（localhost 访问）
+# 本地 Docker 部署（localhost 访问）,推荐python 3.10以上版本
 bash build_base_image.sh  #基础镜像先构建，构建hermes镜像，以后修改hermes下的内容，都以直接使用python deploy_docker.py进行基于基础镜像进行build就可以了,可以大大节约build的时间，每次build大概只需要1-2分钟。
 build_base_image.sh构建的是hermes-base:lastest
 python deploy_docker.py --rebuild hermes 
