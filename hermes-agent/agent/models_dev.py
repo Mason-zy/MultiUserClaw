@@ -158,7 +158,6 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "alibaba": "alibaba",
     "qwen-oauth": "alibaba",
     "copilot": "github-copilot",
-    "ai-gateway": "vercel",
     "opencode-zen": "opencode",
     "opencode-go": "opencode-go",
     "kilocode": "kilo",
@@ -167,6 +166,9 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "gemini": "google",
     "google": "google",
     "xai": "xai",
+    # xAI OAuth is an authentication/transport path for the same xAI model
+    # catalog, so model metadata should resolve through the xAI provider.
+    "xai-oauth": "xai",
     "xiaomi": "xiaomi",
     "nvidia": "nvidia",
     "groq": "groq",
@@ -513,7 +515,7 @@ def list_provider_models(provider: str) -> List[str]:
     """
     from hermes_cli.models import normalize_provider
     provider = normalize_provider(provider) or provider
-
+    
     models = _get_provider_models(provider)
     if models is None:
         return []

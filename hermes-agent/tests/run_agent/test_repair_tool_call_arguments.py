@@ -1,7 +1,6 @@
 """Tests for _repair_tool_call_arguments — malformed JSON repair pipeline."""
 
 import json
-import pytest
 
 from run_agent import _repair_tool_call_arguments
 
@@ -140,3 +139,4 @@ class TestRepairToolCallArguments:
         result = _repair_tool_call_arguments(raw, "t")
         parsed = json.loads(result)
         assert "line" in parsed["msg"]
+

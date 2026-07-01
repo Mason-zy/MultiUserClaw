@@ -27,7 +27,7 @@ RUN if [ -n "${APT_DEBIAN_MIRROR}" ]; then \
     apt-get -o Acquire::Retries=5 update && \
     apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
-        libffi-dev shared-mime-info chromium python3-pip \
+        libffi-dev shared-mime-info chromium python3-pip gosu \
         poppler-utils tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
         libreoffice-core libreoffice-writer libreoffice-calc \
         libmagic1 file antiword catdoc && \
@@ -50,11 +50,16 @@ RUN if [ "$HERMES_INSTALL_WHATSAPP_BRIDGE" = "true" ]; then \
     fi
 
 # Copy source code (updates on top of base image)
-COPY --chown=hermes:hermes pyproject.toml requirements.txt ./
+COPY --chown=hermes:hermes pyproject.toml ./
 COPY --chown=hermes:hermes acp_adapter agent cron gateway hermes_cli plugins tools ./
-COPY --chown=hermes:hermes batch_runner.py cli.py hermes_constants.py hermes_logging.py hermes_state.py hermes_time.py model_tools.py rl_cli.py run_agent.py setup.py toolset_distributions.py toolsets.py trajectory_compressor.py utils.py ./
+COPY --chown=hermes:hermes batch_runner.py cli.py hermes_constants.py hermes_logging.py hermes_state.py hermes_time.py model_tools.py run_agent.py setup.py toolset_distributions.py toolsets.py trajectory_compressor.py utils.py ./
 
-RUN chown -R hermes:hermes /opt/hermes
+# LOCAL: base 已用部分可写 seal（hermes-agent/Dockerfile 不加 a-w），所以 bridge 不需要
+# 全树 chown —— 那会在 overlay2 上遍历百万 inode 卡 ~26 分钟（见 .claude/memory.md 第40节）。
+# base 唯一还归 root 的 build 写入点是 web/node_modules（npm install 时 root 装的），
+# bridge 的 npm run build 要写它的 .tmp/.vite，只解锁这一个子树即可；
+# .venv/ui-tui/源码 base 已 hermes 可写。
+RUN chown -R hermes:hermes /opt/hermes/web/node_modules
 USER hermes
 RUN if [ ! -d /opt/hermes/.venv ]; then uv venv --seed /opt/hermes/.venv; fi && \
     uv pip install --no-cache-dir -i ${PIP_INDEX_URL} setuptools wheel weasyprint \

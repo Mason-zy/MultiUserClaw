@@ -130,7 +130,7 @@ body:
     attributes:
       label: Additional Logs / Traceback (optional)
       description: |
-        The debug report above covers most logs. Use this field for any extra error output,
+        The debug report above covers most logs. Use this field for any extra error output, 
         tracebacks, or screenshots not captured by `hermes debug share`.
       render: shell
 

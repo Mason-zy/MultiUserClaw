@@ -16,12 +16,12 @@ from hermes_cli import runtime_provider as rp
 
 def test_list_authenticated_providers_includes_full_models_list_from_user_providers(monkeypatch):
     """User-defined providers should expose both default_model and full models list.
-
+    
     Regression test: previously only default_model was shown in /model picker.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
-
+    
     user_providers = {
         "local-ollama": {
             "name": "Local Ollama",
@@ -35,20 +35,20 @@ def test_list_authenticated_providers_includes_full_models_list_from_user_provid
             ],
         }
     }
-
+    
     providers = list_authenticated_providers(
         current_provider="local-ollama",
         user_providers=user_providers,
         custom_providers=[],
         max_models=50,
     )
-
+    
     # Find our user provider
     user_prov = next(
         (p for p in providers if p.get("is_user_defined") and p["slug"] == "local-ollama"),
         None
     )
-
+    
     assert user_prov is not None, "User provider 'local-ollama' should be in results"
     assert user_prov["total_models"] == 4, f"Expected 4 models, got {user_prov['total_models']}"
     assert "minimax-m2.7:cloud" in user_prov["models"]
@@ -61,7 +61,7 @@ def test_list_authenticated_providers_dedupes_models_when_default_in_list(monkey
     """When default_model is also in models list, don't duplicate."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
-
+    
     user_providers = {
         "my-provider": {
             "api": "http://example.com/v1",
@@ -69,18 +69,18 @@ def test_list_authenticated_providers_dedupes_models_when_default_in_list(monkey
             "models": ["model-a", "model-b", "model-c"],
         }
     }
-
+    
     providers = list_authenticated_providers(
         current_provider="my-provider",
         user_providers=user_providers,
         custom_providers=[],
     )
-
+    
     user_prov = next(
         (p for p in providers if p.get("is_user_defined")),
         None
     )
-
+    
     assert user_prov is not None
     assert user_prov["total_models"] == 3, "Should have 3 unique models, not 4"
     assert user_prov["models"].count("model-a") == 1, "model-a should not be duplicated"
@@ -254,8 +254,13 @@ def test_openai_native_curated_catalog_is_non_empty():
     assert len(_PROVIDER_MODELS["openai"]) >= 4
 
 
-def test_list_authenticated_providers_openai_built_in_nonzero_total(monkeypatch):
-    """Built-in openai row must not report total_models=0 when creds exist."""
+def test_list_authenticated_providers_openai_alias_not_emitted_as_phantom(monkeypatch):
+    """Bare 'openai' is an alias to the OpenRouter aggregator, NOT a directly-
+    routable provider. It must NOT be emitted as its own picker row: selecting
+    such a row resolves via resolve_provider_full() to OpenRouter, silently
+    switching the user onto an endpoint they may have no key for (HTTP 401).
+    Real OpenAI access comes via 'openai-api' (direct) or a providers.openai
+    config entry — both of which carry api.openai.com. See model-picker bug."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(
         "agent.models_dev.fetch_models_dev",
@@ -271,8 +276,63 @@ def test_list_authenticated_providers_openai_built_in_nonzero_total(monkeypatch)
         max_models=50,
     )
     row = next((p for p in providers if p.get("slug") == "openai"), None)
-    assert row is not None
-    assert row["total_models"] > 0
+    assert row is None, (
+        "bare 'openai' alias must not appear as a standalone picker row — "
+        "it routes through OpenRouter and traps users without an OR key"
+    )
+
+
+def test_resolve_provider_full_user_config_openai_beats_alias():
+    """A providers.openai config entry must win over the built-in
+    'openai' → 'openrouter' alias. Regression for the model-picker bug
+    where users with provider=openai-api + a providers.openai config block
+    had their OpenAI selection silently routed to OpenRouter (HTTP 401)."""
+    from hermes_cli.providers import resolve_provider_full
+
+    user_providers = {
+        "openai": {
+            "name": "OpenAI-API",
+            "api": "https://api.openai.com/v1",
+            "transport": "codex_responses",
+            "models": {"gpt-5.4-nano": {}},
+        }
+    }
+    pdef = resolve_provider_full("openai", user_providers, [])
+    assert pdef is not None
+    # Must resolve to the user's direct endpoint, NOT the OpenRouter aggregator.
+    assert pdef.id == "openai"
+    assert pdef.source == "user-config"
+    assert pdef.base_url == "https://api.openai.com/v1"
+    assert "openrouter" not in pdef.base_url
+
+
+def test_switch_model_user_config_openai_does_not_hop_to_openrouter(monkeypatch):
+    """End-to-end: selecting a providers.openai config row in the picker must
+    resolve to api.openai.com, never silently switch to OpenRouter."""
+    monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-resolved")
+    user_providers = {
+        "openai": {
+            "name": "OpenAI-API",
+            "api": "https://api.openai.com/v1",
+            "api_key": "${CUSTOM_OPENAI_API_KEY}",
+            "transport": "codex_responses",
+            "models": {"gpt-5.4-nano": {}, "gpt-4o-mini": {}},
+        }
+    }
+    result = switch_model(
+        raw_input="gpt-4o-mini",
+        current_provider="openai-api",
+        current_model="gpt-5.4-nano",
+        current_base_url="https://api.openai.com/v1",
+        current_api_key="sk-test",
+        explicit_provider="openai",
+        user_providers=user_providers,
+        custom_providers=[],
+    )
+    assert result.success, result.error_message
+    assert result.target_provider != "openrouter"
+    assert "openrouter" not in (result.base_url or "")
+    assert result.base_url == "https://api.openai.com/v1"
 
 
 def test_list_authenticated_providers_user_openai_official_url_fallback(monkeypatch):
@@ -302,7 +362,7 @@ def test_list_authenticated_providers_fallback_to_default_only(monkeypatch):
     """When no models array is provided, should fall back to default_model."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
-
+    
     user_providers = {
         "simple-provider": {
             "name": "Simple Provider",
@@ -311,18 +371,18 @@ def test_list_authenticated_providers_fallback_to_default_only(monkeypatch):
             # No 'models' key
         }
     }
-
+    
     providers = list_authenticated_providers(
         current_provider="",
         user_providers=user_providers,
         custom_providers=[],
     )
-
+    
     user_prov = next(
         (p for p in providers if p.get("is_user_defined")),
         None
     )
-
+    
     assert user_prov is not None
     assert user_prov["total_models"] == 1
     assert user_prov["models"] == ["single-model"]
@@ -604,15 +664,15 @@ def test_get_named_custom_provider_finds_user_providers_by_key(monkeypatch, tmp_
             }
         }
     }
-
+    
     import yaml
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump(config))
-
+    
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
+    
     result = rp._get_named_custom_provider("local-localhost:11434")
-
+    
     assert result is not None
     assert result["base_url"] == "http://localhost:11434/v1"
     assert result["name"] == "Local (localhost:11434)"
@@ -629,16 +689,16 @@ def test_get_named_custom_provider_finds_by_display_name(monkeypatch, tmp_path):
             }
         }
     }
-
+    
     import yaml
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump(config))
-
+    
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
+    
     # Should find by display name (normalized)
     result = rp._get_named_custom_provider("my-production-ollama")
-
+    
     assert result is not None
     assert result["base_url"] == "http://ollama.example.com/v1"
 
@@ -654,15 +714,15 @@ def test_get_named_custom_provider_falls_back_to_legacy_format(monkeypatch, tmp_
             }
         ]
     }
-
+    
     import yaml
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump(config))
-
+    
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
+    
     result = rp._get_named_custom_provider("custom-endpoint")
-
+    
     assert result is not None
 
 
@@ -675,15 +735,15 @@ def test_get_named_custom_provider_returns_none_for_unknown(monkeypatch, tmp_pat
             }
         }
     }
-
+    
     import yaml
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump(config))
-
+    
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
+    
     result = rp._get_named_custom_provider("other-provider")
-
+    
     # "unknown-provider" partial-matches "known-provider" because "unknown" doesn't match
     # but our matching is loose (substring). Let's verify a truly non-matching provider
     result = rp._get_named_custom_provider("completely-different-name")
@@ -700,15 +760,15 @@ def test_get_named_custom_provider_skips_empty_base_url(monkeypatch, tmp_path):
             }
         }
     }
-
+    
     import yaml
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump(config))
-
+    
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
+    
     result = rp._get_named_custom_provider("incomplete-provider")
-
+    
     assert result is None
 
 
@@ -719,7 +779,7 @@ def test_get_named_custom_provider_skips_empty_base_url(monkeypatch, tmp_path):
 def test_switch_model_resolves_user_provider_credentials(monkeypatch, tmp_path):
     """/model switch should resolve credentials for providers: dict providers."""
     import yaml
-
+    
     config = {
         "providers": {
             "local-ollama": {
@@ -729,17 +789,17 @@ def test_switch_model_resolves_user_provider_credentials(monkeypatch, tmp_path):
             }
         }
     }
-
+    
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump(config))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
+    
     # Mock validation to pass
     monkeypatch.setattr(
         "hermes_cli.models.validate_requested_model",
         lambda *a, **k: {"accepted": True, "persist": True, "recognized": True, "message": None}
     )
-
+    
     result = switch_model(
         raw_input="kimi-k2.5:cloud",
         current_provider="local-ollama",
@@ -984,3 +1044,81 @@ def test_user_provider_override_rejects_mangled_private_models(
 
     assert result.success is False
     assert result.error_message == "not found"
+
+
+# =============================================================================
+# Section 3 no-auth live discovery (PR #29575)
+# =============================================================================
+
+def test_section3_probes_no_key_endpoint_without_explicit_models(monkeypatch):
+    """A providers: entry with no api_key and no explicit models: list should
+    still probe /v1/models for live discovery — mirroring section 4's policy.
+
+    Regression for #29575: local self-hosted backends (llama.cpp, Ollama,
+    vLLM) that don't require auth previously showed an empty/minimal model
+    list because section 3 gated probing on ``api_url and api_key``.
+    """
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    probed = {}
+
+    def _fake_fetch(api_key, api_url):
+        probed["called"] = True
+        probed["api_key"] = api_key
+        probed["api_url"] = api_url
+        return ["live-model-1", "live-model-2", "live-model-3"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", _fake_fetch)
+
+    user_providers = {
+        "local-llamacpp": {
+            "name": "Local llama.cpp",
+            "api": "http://localhost:8080/v1",
+            # No api_key, no models list — bare local endpoint.
+        }
+    }
+
+    providers = list_authenticated_providers(
+        current_provider="local-llamacpp",
+        user_providers=user_providers,
+        custom_providers=[],
+        max_models=50,
+    )
+
+    assert probed.get("called") is True, "no-key bare endpoint should be probed"
+    assert probed["api_key"] == ""
+    row = next(p for p in providers if p["slug"] == "local-llamacpp")
+    assert row["models"] == ["live-model-1", "live-model-2", "live-model-3"]
+    assert row["total_models"] == 3
+
+
+def test_section3_skips_probe_when_no_key_but_explicit_models(monkeypatch):
+    """A no-key endpoint WITH an explicit models: list is the user narrowing a
+    public endpoint to a subset — skip live discovery and keep the list."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    def _fail_fetch(api_key, api_url):
+        raise AssertionError("should not probe when explicit models are set")
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", _fail_fetch)
+
+    user_providers = {
+        "public-subset": {
+            "name": "Public Subset",
+            "api": "https://ollama.com/v1",
+            "models": ["only-a", "only-b"],
+        }
+    }
+
+    providers = list_authenticated_providers(
+        current_provider="public-subset",
+        user_providers=user_providers,
+        custom_providers=[],
+        max_models=50,
+    )
+
+    row = next(p for p in providers if p["slug"] == "public-subset")
+    assert row["models"] == ["only-a", "only-b"]
+    assert row["total_models"] == 2

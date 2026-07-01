@@ -7,7 +7,6 @@ hooks_auto_accept: config key).
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -310,3 +309,4 @@ class TestHooksAutoAcceptParsing:
         assert shell_hooks._resolve_effective_accept(
             {"hooks_auto_accept": "false"}, accept_hooks_arg=True,
         ) is True
+

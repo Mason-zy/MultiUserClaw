@@ -36,7 +36,7 @@ PROTECTED_PREFIXES = (
     "deploy_copy/",
 )
 
-SKIP_DIRS = {"node_modules", "dist", "dist-runtime", ".turbo", ".cache", ".pytest_cache"}
+SKIP_DIRS = {"node_modules", "dist", "dist-runtime", ".turbo", ".cache", ".pytest_cache", "__pycache__"}
 ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "websocket"}
 
 
