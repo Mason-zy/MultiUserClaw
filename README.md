@@ -9,7 +9,7 @@
 
 ## 📌 版本分支说明
 
-- **main 分支**：当前主分支，基于hermes，因为hermes比openclaw快很多，所以全面切换为hermes分支
+- **main 分支**：当前主分支，基于hermes 6月底版本，因为hermes比openclaw快很多，所以全面切换为hermes分支
 - **openclaw 分支**：旧主分支（已归档），基于 OpenClaw 2026.5.10
 - **nanobot014v3 分支**：nanobot 的 0.1.4 post v3 版本
 
