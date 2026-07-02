@@ -438,9 +438,13 @@ export default function Channels() {
           active = false
           setFeishuPhase('committing')
           try {
-            await feishuOnboardCommit(r.app_id, r.app_secret, r.domain || domain)
+            const commitRes = await feishuOnboardCommit(r.app_id, r.app_secret, r.domain || domain, r.open_id)
             setFeishuPhase('success')
-            setFeishuMsg('✓ 飞书机器人创建成功，容器正在重启（约 10-20 秒后上线）')
+            setFeishuMsg(
+              commitRes.home_channel_set
+                ? '✓ 飞书机器人已连接！直接在飞书给它发消息即可对话（无需 /sethome）'
+                : '✓ 飞书机器人创建成功，容器正在重启（约 10-20 秒后上线）。首次发消息后请回复 /sethome 设为主页频道'
+            )
           } catch (e: any) {
             setFeishuPhase('error')
             setFeishuMsg('保存凭证失败：' + (e?.message || '未知错误'))

@@ -625,16 +625,67 @@ async def feishu_onboard_poll(payload: dict):
     return {"status": "pending"}
 
 
+# LOCAL: Feishu open API hosts for the post-onboarding welcome message.
+# accounts.feishu.cn (onboarding device-flow) and open.feishu.cn (IM API) are
+# distinct hosts; the lark (international) variant uses larksuite.com.
+_FEISHU_OPEN_URLS = {"feishu": "https://open.feishu.cn", "lark": "https://open.larksuite.com"}
+
+
+async def _feishu_send_welcome_and_get_chat_id(
+    app_id: str, app_secret: str, domain: str, open_id: str
+) -> str:
+    """Exchange app credentials for a tenant_access_token, send a welcome message
+    to the creator via open_id, and return the P2P chat_id from the response.
+
+    The Feishu IM send API returns the P2P chat_id in ``data.chat_id`` even when
+    addressed by open_id — that chat_id is then fed back as FEISHU_HOME_CHANNEL so
+    hermes boots with a home channel pre-set and the user never needs /sethome.
+    Raises on any failure; the caller treats this as best-effort.
+    """
+    base = _FEISHU_OPEN_URLS.get(domain, _FEISHU_OPEN_URLS["feishu"])
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        token_resp = await client.post(
+            f"{base}/open-apis/auth/v3/tenant_access_token/internal",
+            json={"app_id": app_id, "app_secret": app_secret},
+        )
+        tenant_token = (token_resp.json() or {}).get("tenant_access_token")
+        if not tenant_token:
+            raise RuntimeError(f"tenant_access_token missing: {token_resp.text}")
+        msg_resp = await client.post(
+            f"{base}/open-apis/im/v1/messages?receive_id_type=open_id",
+            headers={"Authorization": f"Bearer {tenant_token}"},
+            json={
+                "receive_id": open_id,
+                "msg_type": "text",
+                "content": json.dumps(
+                    {"text": "✅ 飞书机器人已连接，直接发消息即可开始对话"},
+                    ensure_ascii=False,
+                ),
+            },
+        )
+        chat_id = ((msg_resp.json() or {}).get("data") or {}).get("chat_id") or ""
+        if not chat_id:
+            raise RuntimeError(f"chat_id missing in send response: {msg_resp.text}")
+        return chat_id
+
+
 @router.post("/feishu/onboard/commit")
 async def feishu_onboard_commit(
     payload: dict,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Persist Feishu credentials into the user container's /opt/data/.env and restart it."""
+    """Persist Feishu credentials, send a welcome message (which also yields the
+    chat_id used to pre-set the home channel), write /opt/data/.env, and restart.
+
+    The welcome message + home-channel pre-set is best-effort: on failure (e.g.
+    open_id missing or Feishu API error) we still persist credentials and restart,
+    falling back to the manual /sethome flow.
+    """
     app_id = (payload.get("app_id") or "").strip()
     app_secret = (payload.get("app_secret") or "").strip()
     domain = (payload.get("domain") or "feishu").strip()
+    open_id = (payload.get("open_id") or "").strip()
     if not app_id or not app_secret:
         raise HTTPException(status_code=400, detail="app_id and app_secret required")
     container = await get_container(db, user.id)
@@ -644,14 +695,29 @@ async def feishu_onboard_commit(
         dc = get_docker_container(container.docker_id)
     except Exception:
         raise HTTPException(status_code=503, detail="Hermes runtime container is unavailable")
+
+    # LOCAL: best-effort welcome message → P2P chat_id. Sending with
+    # receive_id_type=open_id makes Feishu auto-create/return the DM chat_id,
+    # which we persist as FEISHU_HOME_CHANNEL so hermes boots with a home channel
+    # and the user is spared the /sethome onboarding step.
+    chat_id = ""
+    if open_id:
+        try:
+            chat_id = await _feishu_send_welcome_and_get_chat_id(
+                app_id, app_secret, domain, open_id
+            )
+        except Exception as exc:
+            logger.warning("feishu welcome/home-channel setup failed for %s: %s", user.id[:8], exc)
+
     # Write FEISHU_* as the hermes user so the file stays hermes-owned (avoids the
     # root-owned .env → entrypoint chmod crash on next restart).
     script = r'''
 import os, sys
-app_id, app_secret, domain = sys.argv[1], sys.argv[2], sys.argv[3]
+app_id, app_secret, domain, chat_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 path = "/opt/data/.env"
 drop = ("FEISHU_APP_ID=", "FEISHU_APP_SECRET=", "FEISHU_DOMAIN=",
-        "FEISHU_CONNECTION_MODE=", "FEISHU_ALLOW_ALL_USERS=", "FEISHU_GROUP_POLICY=")
+        "FEISHU_CONNECTION_MODE=", "FEISHU_ALLOW_ALL_USERS=", "FEISHU_GROUP_POLICY=",
+        "FEISHU_HOME_CHANNEL=", "FEISHU_HOME_CHANNEL_NAME=")
 lines = []
 if os.path.exists(path):
     with open(path, encoding="utf-8") as f:
@@ -664,10 +730,15 @@ lines += [
     "FEISHU_ALLOW_ALL_USERS=true",
     "FEISHU_GROUP_POLICY=open",
 ]
+if chat_id:
+    lines += [
+        f"FEISHU_HOME_CHANNEL={chat_id}",
+        "FEISHU_HOME_CHANNEL_NAME=主聊天",
+    ]
 with open(path, "w", encoding="utf-8") as f:
     f.write("\n".join(lines) + "\n")
 '''
-    result = dc.exec_run(["python3", "-c", script, app_id, app_secret, domain], user="hermes")
+    result = dc.exec_run(["python3", "-c", script, app_id, app_secret, domain, chat_id], user="hermes")
     if getattr(result, "exit_code", 1) != 0:
         out = result.output.decode("utf-8", errors="replace") if result.output else ""
         raise HTTPException(status_code=500, detail=f"Failed to write .env: {out}")
@@ -676,7 +747,7 @@ with open(path, "w", encoding="utf-8") as f:
     except Exception as exc:
         logger.error("feishu onboard restart failed for %s: %s", user.id[:8], exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Restart failed: {exc}")
-    return {"success": True, "restarted": True}
+    return {"success": True, "restarted": True, "home_channel_set": bool(chat_id)}
 
 
 @router.post("/container/doctor-fix")

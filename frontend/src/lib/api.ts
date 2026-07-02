@@ -966,6 +966,7 @@ export interface FeishuOnboardPoll {
   app_id?: string
   app_secret?: string
   domain?: string
+  open_id?: string
   error?: string
 }
 
@@ -976,10 +977,15 @@ export async function feishuOnboardPoll(device_code: string, domain: string): Pr
   })
 }
 
-export async function feishuOnboardCommit(app_id: string, app_secret: string, domain: string): Promise<{ success: boolean; restarted: boolean }> {
-  return fetchJSON<{ success: boolean; restarted: boolean }>('/api/openclaw/feishu/onboard/commit', {
+export async function feishuOnboardCommit(
+  app_id: string,
+  app_secret: string,
+  domain: string,
+  open_id?: string,
+): Promise<{ success: boolean; restarted: boolean; home_channel_set?: boolean }> {
+  return fetchJSON<{ success: boolean; restarted: boolean; home_channel_set?: boolean }>('/api/openclaw/feishu/onboard/commit', {
     method: 'POST',
-    body: JSON.stringify({ app_id, app_secret, domain }),
+    body: JSON.stringify({ app_id, app_secret, domain, open_id }),
   })
 }
 
