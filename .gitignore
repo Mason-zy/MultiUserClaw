@@ -56,8 +56,6 @@ cache
 .env_dev
 .env_prod
 .parquet
-.claude
-.claude/settings.local.json
 .codex
 .hermes
 .qoder
