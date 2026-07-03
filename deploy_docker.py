@@ -55,13 +55,8 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-AUTO_START_DOCKER_ENV = "NANOBOT_AUTO_START_DOCKER_DESKTOP"
 DEFAULT_APT_DEBIAN_MIRROR = "http://mirrors.ustc.edu.cn/debian"
 DEFAULT_APT_SECURITY_MIRROR = "http://mirrors.ustc.edu.cn/debian-security"
-
-
-def env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def resolve_vite_api_url(host: str, gateway_port: int, relative_api: bool) -> str:
@@ -115,13 +110,6 @@ def check_prerequisites():
     """检查 docker 和 docker compose 是否可用。"""
     log("检查前置依赖...")
 
-    if env_flag(AUTO_START_DOCKER_ENV):
-        if not docker_result.ok:
-            error(docker_result.error or "Docker daemon 未运行，请先启动 Docker")
-            sys.exit(1)
-        if docker_result.started_desktop:
-            success("Docker Desktop 已通过 PowerShell 启动")
-
     for cmd, name in [("docker --version", "Docker"), ("docker compose version", "Docker Compose")]:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if result.returncode != 0:
@@ -132,10 +120,7 @@ def check_prerequisites():
     # 检查 docker daemon
     result = subprocess.run("docker info", shell=True, capture_output=True, text=True)
     if result.returncode != 0:
-        error(
-            "Docker daemon 未运行，请先启动 Docker；WSL 本机场景可显式设置 "
-            f"{AUTO_START_DOCKER_ENV}=1 后再运行"
-        )
+        error("Docker daemon 未运行，请先启动 Docker")
         sys.exit(1)
     success("Docker daemon 运行中")
 
@@ -379,7 +364,7 @@ def clean_all(compose_file: str):
 
     log("清理用户容器...")
     result = subprocess.run(
-        'docker ps -a --filter "name=openclaw-user-" -q',
+        'docker ps -a --filter "name=hermes-user-" -q',
         shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
     )
     container_ids = result.stdout.strip()
