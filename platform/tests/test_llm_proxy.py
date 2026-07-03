@@ -223,3 +223,59 @@ async def test_proxy_does_not_add_reasoning_effort_when_thinking_is_explicit(mon
 
     assert "reasoning_effort" not in captured_kwargs
     assert captured_kwargs["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+
+@pytest.mark.asyncio
+async def test_successful_litellm_call_writes_audit_log_exactly_once(monkeypatch):
+    """A successful non-streaming LiteLLM call writes the llm_call audit_log exactly once.
+
+    _record_usage writes audit_log internally; the outer call site previously wrote a
+    second, duplicate record. After removing the duplicate, write_audit_log is called
+    exactly once per LLM call.
+    """
+    monkeypatch.setattr(service.settings, "dev_openclaw_url", "")  # real auth path -> reach user lookup
+    monkeypatch.setattr(service.settings, "hermes_reasoning_effort", "none")
+    monkeypatch.setattr(service.settings, "hermes_service_tier", "")
+    monkeypatch.setattr(
+        service,
+        "_resolve_provider",
+        lambda _model: ("openai/gpt-5.4", "openai-key", None, None),
+    )
+    monkeypatch.setattr(service, "_litellm_model_supports_param", lambda *args: True)
+
+    # Real auth chain: decode_token -> valid payload, db.execute -> fake user
+    monkeypatch.setattr(service, "decode_token", lambda _t: {"type": "access", "sub": "u1"})
+    monkeypatch.setattr(service, "_check_quota", AsyncMock())
+
+    fake_user = SimpleNamespace(id="u1", is_active=True)
+    db = AsyncMock()
+    user_result = SimpleNamespace(scalar_one_or_none=lambda: fake_user)
+    container_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    db.execute = AsyncMock(side_effect=[user_result, container_result])
+    db.add = lambda _obj: None  # _record_usage internally does db.add(UsageRecord(...))
+
+    async def fake_acompletion(**kwargs):
+        return SimpleNamespace(
+            model_dump=lambda: {"ok": True},
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        )
+
+    monkeypatch.setattr(service, "acompletion", fake_acompletion)
+
+    audit_calls = []
+    monkeypatch.setattr(
+        service, "write_audit_log",
+        AsyncMock(side_effect=lambda *a, **k: audit_calls.append(k)),
+    )
+
+    await service.proxy_chat_completion(
+        db=db,
+        container_token="jwt-token",
+        raw_request={
+            "model": "openai/gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        },
+    )
+
+    assert len(audit_calls) == 1, f"audit_log should be written exactly once, got {len(audit_calls)} (duplicate-write bug)"
