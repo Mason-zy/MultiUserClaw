@@ -149,7 +149,8 @@ def test_build_hermes_runtime_files_support_platform_default_model(monkeypatch):
     assert parsed["auxiliary"]["vision"]["provider"] == "custom"
     assert parsed["auxiliary"]["vision"]["model"] == "openai/glm-5.1"
     assert parsed["auxiliary"]["vision"]["base_url"] == "http://gateway:8080/llm/v1"
-    assert parsed["auxiliary"]["vision"]["api_key"] == "proxy-key"
+    # api_key 不在基础 config_yaml 里——由 _write_hermes_runtime_files 从容器 env
+    # NANOBOT_PROXY__TOKEN 读取真实 token 注入，保证每容器用自己唯一的 container_token。
 
 
 def test_write_hermes_runtime_files_repairs_data_volume_ownership(monkeypatch):
