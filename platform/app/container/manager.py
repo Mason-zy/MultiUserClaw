@@ -232,6 +232,15 @@ def _build_hermes_config_yaml() -> str:
             "reasoning_effort": settings.hermes_reasoning_effort,
             "service_tier": settings.hermes_service_tier,
         },
+        # LOCAL: TASK-1 — 注入 auxiliary.vision 配置，让 hermes 容器内 vision 走平台 gateway 代理
+        "auxiliary": {
+            "vision": {
+                "provider": "custom",
+                "model": "openai/glm-5.1",
+                "base_url": settings.dedicated_hermes_default_base_url,
+                "api_key": settings.dedicated_hermes_default_api_key,
+            },
+        },
     }
     return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
 

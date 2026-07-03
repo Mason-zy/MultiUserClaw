@@ -1,5 +1,6 @@
 import sys
 import types
+import yaml
 from types import SimpleNamespace
 
 from app.config import Settings
@@ -143,6 +144,12 @@ def test_build_hermes_runtime_files_support_platform_default_model(monkeypatch):
     assert 'HERMES_API_TOOLSETS=none' in env_file
     assert 'HERMES_REASONING_EFFORT=none' in env_file
     assert 'HERMES_SERVICE_TIER=' in env_file
+
+    parsed = yaml.safe_load(config_yaml)
+    assert parsed["auxiliary"]["vision"]["provider"] == "custom"
+    assert parsed["auxiliary"]["vision"]["model"] == "openai/glm-5.1"
+    assert parsed["auxiliary"]["vision"]["base_url"] == "http://gateway:8080/llm/v1"
+    assert parsed["auxiliary"]["vision"]["api_key"] == "proxy-key"
 
 
 def test_write_hermes_runtime_files_repairs_data_volume_ownership(monkeypatch):
