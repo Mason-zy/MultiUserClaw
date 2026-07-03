@@ -16,7 +16,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: nanobot
-      POSTGRES_PASSWORD: nanobot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
       POSTGRES_DB: nanobot_platform
     ports:
       - "9901:5432"
