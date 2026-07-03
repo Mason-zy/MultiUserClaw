@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     dedicated_hermes_default_provider: str = "custom"
     dedicated_hermes_default_base_url: str = "http://gateway:8080/llm/v1"
     dedicated_hermes_default_api_key: str = "platform-proxy"
+    dedicated_hermes_default_vision_model: str = "openai/gpt-5.4"
     dedicated_runtime_container_name_prefix: str = "hermes-user"
     dedicated_runtime_data_volume_prefix: str = "hermes-data"
     container_network: str = "openclaw-internal"

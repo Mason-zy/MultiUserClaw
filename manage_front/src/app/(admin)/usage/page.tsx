@@ -22,7 +22,7 @@ export default function UsagePage() {
     getUsers(1, 1000).then((r) => setUsers(r.items ?? [])).catch(() => {});
   }, []);
 
-  // summary 全局 + history 按选中用户筛选（后端 /usage/history?user_id= 已支持）
+  // summary + history 均按选中用户筛选（后端 /usage/summary 和 /usage/history 都已支持 user_id）
   useEffect(() => {
     setLoading(true);
     Promise.all([
@@ -42,7 +42,7 @@ export default function UsagePage() {
     <div>
       <h2 className="text-2xl font-bold mb-6">用量统计</h2>
 
-      {/* LOCAL: 用户筛选 MVP（单选 + All），后端 /usage/history?user_id= 已支持；summary 后端暂不支持按用户，保持全局 */}
+      {/* LOCAL: 用户筛选 MVP（单选 + All）；summary 今日 token + history 均按 user_id 筛选（后端都已支持），total_users/active_containers 保持全局 */}
       <Card className="mb-6">
         <CardHeader>
           <CardTitle className="text-sm text-gray-500">用户筛选</CardTitle>

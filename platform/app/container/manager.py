@@ -238,7 +238,7 @@ def _build_hermes_config_yaml() -> str:
         "auxiliary": {
             "vision": {
                 "provider": "custom",
-                "model": "openai/glm-5.1",
+                "model": settings.dedicated_hermes_default_vision_model,
                 "base_url": settings.dedicated_hermes_default_base_url,
             },
         },

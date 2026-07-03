@@ -18,8 +18,58 @@ metadata:
 统一存 `/opt/data/sessions/`（全局），profile 下 `sessions/` 永远空。设计如此，非 bug。
 ## 6. 端口（gateway=9900 postgres=9901 frontend=3080 manage=3081 simple=3082）
 8080/15432 被主机占。compose `ports` 是 append 非 replace，override 加端口不替换，直接改 `docker-compose.yml`。v0.17.0 新服云安全组只开 8000-9000 → override 追加 8180/8181/8182 外部映射（归档 N）。
-## 7. LLM 模型 seed 只跑一次
-`model_config.py:seed_model_config_from_env()` 仅 `model_provider_configs` 表空时跑。改 .env DEFAULT_MODEL 无效，改 DB/代码。
+## 7. 模型体系（2026-07-03 整合 #7/#18/#36/#39/#44/#46）
+
+> 主模型（对话推理）+ vision 模型（看图代理）两层，各走各的配置链。每个容器独立 config.yaml，改完下条消息即生效、不重启。
+
+### 配置数据流
+
+```
+.env / docker-compose environment                  litellm 表 (model_provider_configs)
+  │  DEFAULT_MODEL=openai/deepseek-v4-pro-anthropic    │  使 gateway 认模型
+  │  PLATFORM_DEDICATED_HERMES_DEFAULT_VISION_MODEL     │  docker compose restart gateway 才刷
+  │     =openai/gpt-5.4                                 │
+  ▼                                                     ▼
+config.py (Settings)                              gateway (litellm 代理)
+  │  default_model: str                                │
+  │  dedicated_hermes_default_vision_model             │
+  ▼                                                     │
+manager.py _build_hermes_config_yaml() ────────────────┘
+  │  生成 /opt/data/config.yaml:
+  │    model.default: openai/deepseek-v4-pro-anthropic
+  │    auxiliary.vision.model: openai/gpt-5.4
+  ▼
+容器 /opt/data/config.yaml ──→ agent 每 run 读盘 (api_server.py:1102)
+  │                             改完下条消息立即生效，不重启
+  ▼
+hermes 原生路由 (image_routing.py:340)
+  │  有 auxiliary.vision → 强制分离 (vision模型看图→文字→主模型)
+  │  无 auxiliary.vision → 检查主模型 supports_vision → native/text
+```
+
+### 三层生效时机
+
+| 层 | 位置 | 怎么改 | 生效时机 | 影响范围 |
+|---|------|--------|---------|---------|
+| 1 | litellm 表 `model_provider_configs` | SQL UPDATE + `docker compose restart gateway` | 重启后 | 让 gateway 认识这个模型 |
+| 2 | `.env` `DEFAULT_MODEL` | 改 .env | 下次 compose up / 新容器 | **仅新容器**，老容器不受影响 |
+| 3 | 容器内 `/opt/data/config.yaml` | `docker exec sed` | **下条消息立即生效** | 仅该容器 |
+
+### 主模型 (model.default)
+
+- **当前**：`openai/deepseek-v4-pro-anthropic`（#44，glm-5.1 余额不足→全容器切）
+- **配置文件**：`config.py:40` `default_model` → `manager.py:236` 写容器 config.yaml
+- **缺陷**：① `settings.default_model` 不读 DB `is_default`（`manager.py:134/456`，#36 延后）② `model_config.py:seed_model_config_from_env()` 仅表空时跑，改 .env 不刷新（#7）③ 用户端 PUT `/models/config` 被 `proxy.py:418` 拒（#18，管理端 `admin.py:404` 是真入口）
+- **切换操作**：见 #44 三层步骤（litellm 表 SQL + .env + 每个容器 sed）
+- **max_tokens 缺失**：`manager.py:221` model 段无 max_tokens → 上游默认 4096，写大 HTML 截断（#39 未修，plan 有）
+
+### Vision 模型 (auxiliary.vision)
+
+- **当前**：`openai/gpt-5.4`（今天从 glm-5.1 切过来，#46）
+- **配置文件**：`config.py:58` `dedicated_hermes_default_vision_model` → `manager.py:241` 写容器 config.yaml
+- **架构**：hermes 原生两阶段分离。我们只补了 missing piece（manager.py 注入 auxiliary.vision 段），路由逻辑 `image_routing.py:340` 一行没改
+- **演变**：无配置（报错）→ glm-5.1（不看图瞎编）→ gpt-5.4（真看图）
+- **注意**：当前所有容器强制分离模式，即使主模型支持 vision（如 gpt-5.4）也会浪费一次辅助调用；切 vision-capable 主模型需删 auxiliary.vision 段走 native
 ## 8. 单用户单容器
 `Container.user_id` unique（`models.py:47`），一用户最多一 hermes 容器，所有 agent 共享。
 ## 11. 前端终端 = docker exec PTY 代理
@@ -30,8 +80,6 @@ metadata:
 存 `profiles/{agent}/workspace/knowledge/`，`hermes_knowledge.py:283-285` 逐行 `in`。不自动注入 system prompt。`KnowledgeBase.tsx` 完整。
 ## 17. 文件管理（双根✅ / 敏感暴露⚠️）
 浏览/读/上传/下载/删除/新建目录全 ✅。双根 `is_hermes_absolute_request`（`hermes_files.py:137`）从 `/` 浏览；相对走 /opt/data。双前缀 bug 已解决（`normalize` `removeprefix`）。⚠️ `.env`/`config.yaml`/`auth.json` 可见可删，未解决。
-## 18. 模型配置：管理端唯一真入口
-用户端 PUT `/models/config` 被 `proxy.py:418` 拒（前端假成功）。管理端 PUT `/api/admin/models`（`admin.py:404-457`）直写 DB。📖 归档 D。
 ## 19. 定时任务（✅ 可用）
 `proxy.py` 透传 hermes `cron/scheduler.py`：列表/创建/删除/运行/启停。`CronJobs.tsx`。gateway 后台线程每 60s 调一次 `tick()`（`/opt/data/logs/agent.log`）。
 ## 20. Node 管理（❌ 不可用）
@@ -53,10 +101,7 @@ platform httpx 调飞书 device flow + 前端二维码轮询，根治 env 覆盖
 ## 35. 飞书 SSO 架构 + roadmap（2026-06-26）
 **SSO 不需重建 hermes**：认证全在 platform（`routes/auth.py`、`auth/service.py` JWT、`db/models.py` User），hermes 不参与（`manager.py:701-706` 仅透传 `INFOX_MED_TOKEN`）。只改 platform+frontend 重建即可。SSO 走网页 OAuth（`open.feishu.cn/open/authen`）≠ device flow，可能需独立飞书应用。
 **roadmap**：✅ workdir/双根/hermes 镜像(v0.17.0)/SSO(TASK-1)；⏭️ 忽略（权限/敏感文件/模型假成功/P2 技术债）。
-## 36. 默认模型缺陷（延后）/ agent 文件下载✅已修
-① 默认模型：agent 用 `settings.default_model` 不读 DB `is_default`（`manager.py:134/456`），当前三者一致无故障，延后。② agent 文件下载 404 ✅ 已修（`normalize_hermes_read_path` 相对 `workspace` 补 `/`）。📖 归档 L。
-## 39. hermes 输出截断：config.yaml 缺 model.max_tokens（2026-06-30 未修复）
-写大 HTML 撞 `finish_reason=length` 被截断。根因：`_build_hermes_config_yaml`（`manager.py:221`）model 段无 max_tokens → 上游默认 4096。解法（plan 未执行）：`config.py` 加 `dedicated_hermes_default_max_tokens: int = 16384`（env 可调）+ `manager.py:221` 注入 `max_tokens`（<=0 不写回退）。新容器自动带；老容器需重建 + **新开会话**。plan 见 `~/.claude/plans/elegant-inventing-pillow.md`。
+## 36. agent 文件下载 ✅已修 — `normalize_hermes_read_path` 相对 `workspace` 补 `/` 修复 404。📖 归档 L
 ## 42. github.com HTTPS 被墙，git 操作走 SSH（2026-07-02 ✅）
 服务器（58.87.64.156 国内）到 **github.com:443 被墙**（curl / ls-remote / git push 全 HTTP=000 超时），但：
 - **api.github.com 通**（HTTP 200），gh CLI 全功能可用（登录 / API / `gh ssh-key`）
@@ -80,17 +125,6 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
 
 分支清理约定：升级/PR 合入 main 后，对应工作分支（如 `upgrade-v017`、`fix/*`）在本地 + origin 私有库删除；`backup-*` 留作回滚保险。
 
-## 44. 切模型操作（三层，改一不可）（2026-07-03）
-
-**Why**：`glm-5.1` 余额不足 → 全容器 LLM 调不通 → 飞书对话全挂。模型切换不只是一个文件——涉及 litellm 表、.env 全局默认、运行中容器 config.yaml 三层。
-
-**三层操作**：
-1. **litellm 表**（让 gateway 认识这个模型）：`model_provider_configs` 的 JSON `models` 数组加目标模型。`UPDATE model_provider_configs SET models = (models::jsonb || '[{"id":"deepseek-v4-pro-anthropic","name":"DeepSeek V4 Pro","enabled":true}]'::jsonb)::json WHERE id='openai';`。验证：`SELECT models FROM model_provider_configs WHERE id='openai'`。改完 `docker compose up -d gateway` 重建生效。注意 `json || jsonb` 语法不兼容，要 cast 一致。
-2. **`.env` 全局默认**：`DEFAULT_MODEL=openai/deepseek-v4-pro-anthropic`。gateway 重启后新容器用这值写 config.yaml（`container/manager.py:221-236`）。老容器不受影响。
-3. **每个运行中容器 config.yaml**（不会自动同步）：`sed -i 's/default: openai\/glm-5.1/default: openai\/deepseek-v4-pro-anthropic/' /opt/data/config.yaml`。改完 **下一条消息立即生效**（agent `_create_agent` 每次新 run 读盘，`api_server.py:1102-1103`），不需重启。
-
-**验证**：直调 fjbigmodel 测 key 能用再切（`curl fjbigmodel.fjdac.cn/v1/chat/completions`），切完看 `agent.log` 确认 `conversation turn` 的 `model=` 生效 + `Turn ended` 成功（非 `API call failed`）。这次踩的坑：`glm-5` key 白名单里有但 litellm 表没配 → `no healthy deployments`；`gpt-5.4` 表里有但旧 key 余额不足 → 502。最终 `deepseek-v4-pro-anthropic` 全通。
-
 ## 45. 撤回飞书 bot 消息（2026-07-03）
 
 **Why**：手动补推销售日报时发了三批共 40 条消息，需要撤回后两次（40 条）。
@@ -101,7 +135,6 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
 
 **现成脚本**：`/tmp/revoke.py`（alice 容器内），接受 `FEISHU_APP_ID`/`FEISHU_APP_SECRET` 环境变量 + 硬编码 mid 列表，批量 DELETE 并统计 ok/fail。
 
-## 46. vision 配置注入（2026-07-03 ✅）— `manager.py:221/465` auxiliary.vision 段，api_key 从容器 env NANOBOT_PROXY__TOKEN 注入（commit a289786）；存量 3 容器手改，新容器自动带。📖 归档 Q
 ## 47. audit_log 双写（2026-07-03 ✅ 代码 ⏳ 待部署）— `service.py:770-782/801-813` 删冗余 write_audit_log，merge 到 main；gateway 镜像重建才生效。📖 归档 Q
 ## 48. baime 全流程实战（2026-07-03）— 两 task 跑通 Proposal/Plan review + loop-backlog worktree 隔离实现。踩坑：marketplace dir 被删 + Agent API Error。📖 归档 Q
 
