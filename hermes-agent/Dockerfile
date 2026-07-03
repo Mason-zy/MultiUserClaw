@@ -61,16 +61,17 @@ RUN if [ -n "${APT_DEBIAN_MIRROR}" ]; then \
 # `.sha256` files from the corresponding release and update the ARGs. The
 # checksum lookup happens during build, so a compromised release artifact
 # fails the build loudly instead of silently producing a tampered image.
+# LOCAL: s6-overlay 源走 ${GITHUB_MIRROR} 前缀。默认空 = 官方 github；
+# CN 服务器到 github.com 不通时：docker build --build-arg GITHUB_MIRROR=https://ghfast.top/
+ARG GITHUB_MIRROR=""
 ARG TARGETARCH
 ARG S6_OVERLAY_VERSION=3.2.3.0
 ARG S6_OVERLAY_NOARCH_SHA256=b720f9d9340efc8bb07528b9743813c836e4b02f8693d90241f047998b4c53cf
 ARG S6_OVERLAY_X86_64_SHA256=a93f02882c6ed46b21e7adb5c0add86154f01236c93cd82c7d682722e8840563
 ARG S6_OVERLAY_AARCH64_SHA256=0952056ff913482163cc30e35b2e944b507ba1025d78f5becbb89367bf344581
 ARG S6_OVERLAY_SYMLINKS_SHA256=a60dc5235de3ecbcf874b9c1f18d73263ab99b289b9329aa950e8729c4789f0e
-# LOCAL: 新服务器到 github.com 不通（i/o timeout），s6-overlay 走 ghfast.top 代理；
-# 原 URL https://github.com/just-containers/... 构建环境若能直连 github 可还原。
-ADD https://ghfast.top/https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp/
-ADD https://ghfast.top/https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-symlinks-noarch.tar.xz /tmp/
+ADD ${GITHUB_MIRROR}https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp/
+ADD ${GITHUB_MIRROR}https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-symlinks-noarch.tar.xz /tmp/
 RUN set -eu; \
     case "${TARGETARCH:-amd64}" in \
         amd64) s6_arch="x86_64"; s6_arch_sha="${S6_OVERLAY_X86_64_SHA256}" ;; \
@@ -78,7 +79,7 @@ RUN set -eu; \
         *) echo "Unsupported TARGETARCH=${TARGETARCH} for s6-overlay" >&2; exit 1 ;; \
     esac; \
     curl -fsSL --retry 3 -o /tmp/s6-overlay-arch.tar.xz \
-        "https://ghfast.top/https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${s6_arch}.tar.xz"; \
+        "${GITHUB_MIRROR}https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${s6_arch}.tar.xz"; \
     { \
         printf '%s  %s\n' "${S6_OVERLAY_NOARCH_SHA256}" /tmp/s6-overlay-noarch.tar.xz; \
         printf '%s  %s\n' "${s6_arch_sha}" /tmp/s6-overlay-arch.tar.xz; \
