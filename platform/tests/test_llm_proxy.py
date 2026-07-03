@@ -223,3 +223,58 @@ async def test_proxy_does_not_add_reasoning_effort_when_thinking_is_explicit(mon
 
     assert "reasoning_effort" not in captured_kwargs
     assert captured_kwargs["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+
+@pytest.mark.asyncio
+async def test_successful_litellm_call_writes_audit_log_exactly_once(monkeypatch):
+    """LiteLLM 非流式成功调用只写一次 llm_call audit_log。
+
+    _record_usage 内部已 write_audit_log；外部曾冗余再写一次（双写）。
+    删除冗余后 write_audit_log 恰好调用 1 次。
+    """
+    monkeypatch.setattr(service.settings, "dev_openclaw_url", "")  # 走真鉴权拿 user
+    monkeypatch.setattr(service.settings, "hermes_reasoning_effort", "none")
+    monkeypatch.setattr(service.settings, "hermes_service_tier", "")
+    monkeypatch.setattr(
+        service,
+        "_resolve_provider",
+        lambda _model: ("openai/gpt-5.4", "openai-key", None, None),
+    )
+    monkeypatch.setattr(service, "_litellm_model_supports_param", lambda *args: True)
+
+    # 真鉴权链：decode_token 返回有效 payload → db.execute 返回 fake user
+    monkeypatch.setattr(service, "decode_token", lambda _t: {"type": "access", "sub": "u1"})
+    monkeypatch.setattr(service, "_check_quota", AsyncMock())
+
+    fake_user = SimpleNamespace(id="u1", is_active=True)
+    db = AsyncMock()
+    user_result = SimpleNamespace(scalar_one_or_none=lambda: fake_user)
+    container_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    db.execute = AsyncMock(side_effect=[user_result, container_result])
+    db.add = lambda _obj: None  # _record_usage 内部 db.add(UsageRecord(...)) 不报错
+
+    async def fake_acompletion(**kwargs):
+        return SimpleNamespace(
+            model_dump=lambda: {"ok": True},
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        )
+
+    monkeypatch.setattr(service, "acompletion", fake_acompletion)
+
+    audit_calls = []
+    monkeypatch.setattr(
+        service, "write_audit_log",
+        AsyncMock(side_effect=lambda *a, **k: audit_calls.append(k)),
+    )
+
+    await service.proxy_chat_completion(
+        db=db,
+        container_token="jwt-token",
+        raw_request={
+            "model": "openai/gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        },
+    )
+
+    assert len(audit_calls) == 1, f"audit_log 应只写 1 次，实际 {len(audit_calls)} 次（双写 bug）"
