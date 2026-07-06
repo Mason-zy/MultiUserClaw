@@ -13,6 +13,7 @@ name: openclaw
 services:
   postgres:
     container_name: openclaw-postgres
+    restart: unless-stopped
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: nanobot
@@ -32,6 +33,7 @@ services:
 
   gateway:
     container_name: openclaw-gateway
+    restart: unless-stopped
     build:
       context: ./platform
       args:
@@ -109,6 +111,7 @@ services:
 
   frontend:
     container_name: openclaw-frontend
+    restart: unless-stopped
     build:
       context: ./frontend
       args:
@@ -122,6 +125,7 @@ services:
 
   manage-front:
     container_name: openclaw-manage
+    restart: unless-stopped
     build: ./manage_front
     ports:
       - "3081:3000"
@@ -134,6 +138,7 @@ services:
 
   simple-front:
     container_name: openclaw-simple
+    restart: unless-stopped
     build:
       context: ./simple_front
       args:
