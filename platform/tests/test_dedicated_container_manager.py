@@ -94,6 +94,11 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     monkeypatch.setattr(manager.settings, "default_model", "claude-sonnet-4-5")
     monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "none")
     monkeypatch.setattr(manager.settings, "container_tz", "Asia/Shanghai")
+    monkeypatch.setattr(
+        manager.settings,
+        "dedicated_hermes_user_site_path",
+        "/opt/data/.local/lib/python3.13/site-packages",
+    )
 
     env = manager._runtime_environment("container-token", "sso-token")
 
@@ -109,6 +114,10 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     assert env["OPENAI_API_KEY"] == "proxy-key"
     assert env["HERMES_API_TOOLSETS"] == "none"
     assert env["INFOX_MED_TOKEN"] == "sso-token"
+    # Persisted user-site packages + default --user installs (see _runtime_environment).
+    assert env["PIP_USER"] == "1"
+    assert env["PIP_BREAK_SYSTEM_PACKAGES"] == "1"
+    assert env["PYTHONPATH"] == "/opt/data/.local/lib/python3.13/site-packages"
     assert "BRIDGE_ENABLE_CHANNELS" not in env
 
 

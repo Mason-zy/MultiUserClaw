@@ -150,6 +150,20 @@ def _runtime_environment(container_token: str, sso_token: str | None) -> dict[st
                 "HERMES_REASONING_EFFORT": settings.hermes_reasoning_effort,
                 "HERMES_SERVICE_TIER": settings.hermes_service_tier,
                 "HERMES_YOLO_MODE": "true",
+                # hermes runs an isolated venv (include-system-site-packages=false,
+                # ENABLE_USER_SITE=False): `pip install` lands in the system site (invisible
+                # to the venv), `pip install --user` in the user site (also invisible), and
+                # venv installs land in the ephemeral container layer. Three envs make a
+                # user's `pip install xxx` Just Work and survive rebuilds:
+                #   PIP_USER=1                   -> install into the user site
+                #   PIP_BREAK_SYSTEM_PACKAGES=1  -> bypass PEP 668 (system pip is externally
+                #                                  managed; user site is safe, single-user box)
+                #   PYTHONPATH                   -> expose the persisted user site to the venv
+                # User site is /opt/data/.local (hermes HOME per Dockerfile), a persisted
+                # volume. Single-user-per-container, so no cross-user risk.
+                "PIP_USER": "1",
+                "PIP_BREAK_SYSTEM_PACKAGES": "1",
+                "PYTHONPATH": settings.dedicated_hermes_user_site_path,
             }
         )
     if sso_token:

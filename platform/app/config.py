@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     dedicated_hermes_default_provider: str = "custom"
     dedicated_hermes_default_base_url: str = "http://gateway:8080/llm/v1"
     dedicated_hermes_default_api_key: str = "platform-proxy"
+    # PYTHONPATH injected into hermes containers so the isolated venv
+    # (/opt/hermes/.venv, include-system-site-packages=false) picks up packages the
+    # user installs via `pip install --user` into the persisted /opt/data volume.
+    dedicated_hermes_user_site_path: str = "/opt/data/.local/lib/python3.13/site-packages"
     dedicated_runtime_container_name_prefix: str = "hermes-user"
     dedicated_runtime_data_volume_prefix: str = "hermes-data"
     container_network: str = "openclaw-internal"
