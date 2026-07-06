@@ -767,8 +767,9 @@ async def proxy_chat_completion(
                             output_tokens=total_output,
                             stream=True,
                         )
-                        # LOCAL: audit_log 已由 _record_usage 内部统一写入（detail 含 provider_id/upstream_model），
-                        # 此处原为冗余双写（每个 LiteLLM 调用产生 2 条 llm_call audit_log），已删除。
+                        # audit_log is written once inside _record_usage (with provider_id/upstream_model).
+                        # The previous duplicate write_audit_log here created 2 llm_call records per call.
+                        await db.commit()
                     except Exception as e:
                         logger.warning("Failed to record streaming usage: %s", e)
 
@@ -787,8 +788,9 @@ async def proxy_chat_completion(
             output_tokens=usage.completion_tokens or 0,
             stream=False,
         )
-        # LOCAL: audit_log 已由 _record_usage 内部统一写入（detail 含 provider_id/upstream_model），
-        # 此处原为冗余双写（每个 LiteLLM 调用产生 2 条 llm_call audit_log），已删除。
+        # audit_log is written once inside _record_usage (with provider_id/upstream_model).
+        # The previous duplicate write_audit_log here created 2 llm_call records per call.
+        await db.commit()
 
     # 7. Update container last_active_at
     if container is not None:

@@ -155,7 +155,8 @@ _MARKDOWN_HINT_RE = re.compile(
     re.MULTILINE,
 )
 # Detect markdown tables: a line starting with | followed by a separator line.
-# Feishu post-type 'md' elements do not render tables, so we force text mode.
+# Kept so that table-bearing content (which _MARKDOWN_HINT_RE may not catch) is
+# still routed into post+md rendering, which now supports GFM tables.
 _MARKDOWN_TABLE_RE = re.compile(r"^\|.*\|\n\|[-|: ]+\|", re.MULTILINE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
@@ -4374,8 +4375,9 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements support GFM tables (CommonMark 0.31).
-        # All markdown content (including tables) goes to post for rendering.
+        # Feishu post-type 'md' elements support GFM tables (CommonMark 0.31),
+        # so table content renders fine inside a post. Route any markdown
+        # (tables included) to post instead of downgrading the whole message.
         if _MARKDOWN_HINT_RE.search(content) or _MARKDOWN_TABLE_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}

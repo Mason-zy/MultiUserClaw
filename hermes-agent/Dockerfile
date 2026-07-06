@@ -61,8 +61,16 @@ RUN if [ -n "${APT_DEBIAN_MIRROR}" ]; then \
 # `.sha256` files from the corresponding release and update the ARGs. The
 # checksum lookup happens during build, so a compromised release artifact
 # fails the build loudly instead of silently producing a tampered image.
-# LOCAL: s6-overlay 源走 ${GITHUB_MIRROR} 前缀。默认空 = 官方 github；
-# CN 服务器到 github.com 不通时：docker build --build-arg GITHUB_MIRROR=https://ghfast.top/
+#
+# Optional GitHub mirror prefix for environments where direct github.com
+# downloads are blocked or unreliable. Default empty string means the official
+# github.com is used verbatim (zero behavior change). To inject a mirror, pass
+# `--build-arg GITHUB_MIRROR=<mirror-prefix>/` at build time; the value MUST end
+# with a trailing slash so it composes correctly into the URL (e.g. the default
+# empty prefix yields the raw github.com URL, a mirror prefix yields
+# `<mirror-prefix>/https://github.com/...` for proxy-style mirrors). The SHA256
+# verification below is unaffected, so a tampered or MitM'd artifact still fails
+# the build loudly. Consistent with the APT_*_MIRROR ARGs above.
 ARG GITHUB_MIRROR=""
 ARG TARGETARCH
 ARG S6_OVERLAY_VERSION=3.2.3.0

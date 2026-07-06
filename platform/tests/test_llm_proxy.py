@@ -227,12 +227,13 @@ async def test_proxy_does_not_add_reasoning_effort_when_thinking_is_explicit(mon
 
 @pytest.mark.asyncio
 async def test_successful_litellm_call_writes_audit_log_exactly_once(monkeypatch):
-    """LiteLLM 非流式成功调用只写一次 llm_call audit_log。
+    """A successful non-streaming LiteLLM call writes the llm_call audit_log exactly once.
 
-    _record_usage 内部已 write_audit_log；外部曾冗余再写一次（双写）。
-    删除冗余后 write_audit_log 恰好调用 1 次。
+    _record_usage writes audit_log internally; the outer call site previously wrote a
+    second, duplicate record. After removing the duplicate, write_audit_log is called
+    exactly once per LLM call.
     """
-    monkeypatch.setattr(service.settings, "dev_openclaw_url", "")  # 走真鉴权拿 user
+    monkeypatch.setattr(service.settings, "dev_openclaw_url", "")  # real auth path -> reach user lookup
     monkeypatch.setattr(service.settings, "hermes_reasoning_effort", "none")
     monkeypatch.setattr(service.settings, "hermes_service_tier", "")
     monkeypatch.setattr(
@@ -242,7 +243,7 @@ async def test_successful_litellm_call_writes_audit_log_exactly_once(monkeypatch
     )
     monkeypatch.setattr(service, "_litellm_model_supports_param", lambda *args: True)
 
-    # 真鉴权链：decode_token 返回有效 payload → db.execute 返回 fake user
+    # Real auth chain: decode_token -> valid payload, db.execute -> fake user
     monkeypatch.setattr(service, "decode_token", lambda _t: {"type": "access", "sub": "u1"})
     monkeypatch.setattr(service, "_check_quota", AsyncMock())
 
@@ -251,7 +252,7 @@ async def test_successful_litellm_call_writes_audit_log_exactly_once(monkeypatch
     user_result = SimpleNamespace(scalar_one_or_none=lambda: fake_user)
     container_result = SimpleNamespace(scalar_one_or_none=lambda: None)
     db.execute = AsyncMock(side_effect=[user_result, container_result])
-    db.add = lambda _obj: None  # _record_usage 内部 db.add(UsageRecord(...)) 不报错
+    db.add = lambda _obj: None  # _record_usage internally does db.add(UsageRecord(...))
 
     async def fake_acompletion(**kwargs):
         return SimpleNamespace(
@@ -277,4 +278,4 @@ async def test_successful_litellm_call_writes_audit_log_exactly_once(monkeypatch
         },
     )
 
-    assert len(audit_calls) == 1, f"audit_log 应只写 1 次，实际 {len(audit_calls)} 次（双写 bug）"
+    assert len(audit_calls) == 1, f"audit_log should be written exactly once, got {len(audit_calls)} (duplicate-write bug)"

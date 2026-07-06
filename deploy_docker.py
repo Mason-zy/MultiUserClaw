@@ -59,10 +59,6 @@ DEFAULT_APT_DEBIAN_MIRROR = "http://mirrors.ustc.edu.cn/debian"
 DEFAULT_APT_SECURITY_MIRROR = "http://mirrors.ustc.edu.cn/debian-security"
 
 
-def env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def resolve_vite_api_url(host: str, gateway_port: int, relative_api: bool) -> str:
     """Resolve frontend API base URL for build args.
 
