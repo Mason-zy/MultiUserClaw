@@ -10025,7 +10025,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
-            if not os.getenv(env_key):
+            # LOCAL: /sethome 写 .env + self.config.platforms[platform].home_channel，
+            # 但 .env 要进程重启才进 os.environ；没重启时 os.getenv 拿不到，会每次新会话
+            # 反复弹提示。回退查 self.config（sethome 已即时写入），任一命中就视为已设置。
+            _home_set = bool(os.getenv(env_key))
+            if not _home_set:
+                _pcfg = None
+                try:
+                    _pcfg = self.config.platforms.get(source.platform)
+                except Exception:
+                    _pcfg = None
+                if _pcfg and getattr(_pcfg, "home_channel", None):
+                    _home_set = True
+            if not _home_set:
                 # Slack dispatches all Hermes commands through a single
                 # parent slash command `/hermes`; bare `/sethome` is not
                 # registered and would fail with "app did not respond".
