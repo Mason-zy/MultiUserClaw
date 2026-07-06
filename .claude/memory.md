@@ -178,6 +178,8 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
 
 **收益**：以后 build hermes 镜像不怕磁盘满（500G 数据盘），根治上次 build 崩系统的磁盘满根因（系统盘 50G → 磁盘满 → postgres 写失败 → 连锁崩）。重建 hermes 镜像现在可安全做（代做清单"bridge 镜像 edge-tts"也可一并）。
 
+**hermes 镜像 build arg 三件套**（2026-07-06 踩坑）：`hermes-agent/Dockerfile` 三个 ARG（`:31/32/66`）必传，不传走官方源 CN 慢/挂：① `GITHUB_MIRROR=https://ghfast.top/`（s6-overlay github 超时，#42）② `APT_DEBIAN_MIRROR=https://mirrors.ustc.edu.cn/debian` + `APT_SECURITY_MIRROR=https://mirrors.ustc.edu.cn/debian-security`（apt 否则直连 deb.debian.org，ffmpeg/gcc 244 包 ~50min）③ `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`（uv pip 加速）。完整命令：`cd hermes-agent && docker build --build-arg GITHUB_MIRROR=https://ghfast.top/ --build-arg APT_DEBIAN_MIRROR=https://mirrors.ustc.edu.cn/debian --build-arg APT_SECURITY_MIRROR=https://mirrors.ustc.edu.cn/debian-security --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t nanobot-hermes-agent:latest .`。本次 build 漏传 APT/PIP mirror，apt 阶段卡 ~50min，整体 60-80min（--no-cache 从头）。build 不影响运行容器（容器锁定旧镜像 ID，不跟 latest tag），build 完老容器不重建零中断，仅新用户/重建老容器时用新镜像。
+
 ## 关联记忆
 - [[multiuserclaw-agent-naming]] [[multiuserclaw-channel-ui]]
 - 详细过程归档 → `.claude/memory/archive-*.md`（入口 `.claude/memory/README.md`）
