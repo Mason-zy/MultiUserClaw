@@ -137,6 +137,13 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
 
 ## 47. audit_log 双写（2026-07-03 ✅ 代码 ⏳ 待部署）— `service.py:770-782/801-813` 删冗余 write_audit_log，merge 到 main；gateway 镜像重建才生效。📖 归档 Q
 ## 48. baime 全流程实战（2026-07-03）— 两 task 跑通 Proposal/Plan review + loop-backlog worktree 隔离实现。踩坑：marketplace dir 被删 + Agent API Error。📖 归档 Q
+## 49. 飞书 @all 触发回复 + home channel 反复弹提示（2026-07-06 ✅）
+
+**问题 1（@all 回复，上游设计）**：`adapter.py:4184-4188` `_mentions_self` 对含 `@_all` 的消息 `return True`，飞书 @所有人被当成 bot 被提及 → `:4127` require_mention 门控通过 → bot 回复。注释写死"@_all is Feishu's @everyone placeholder"是有意为之。另两条路径（`_message_mentions_bot` 按 ID 严格匹配 / `_post_mentions_bot` 只看 `is_self`）不会误判 @all。**修复**：删 `:4187-4188` 两行，仅改容器内 `/opt/hermes/plugins/platforms/feishu/adapter.py`（用户定单用户修复，**不进仓库**），3 容器都改 + 重启 gateway 生效。
+
+**问题 2（home channel 反复弹，上游 bug）**：`run.py:10025-10044` 的"📬 No home channel"提示查 `os.getenv(env_key)`，但 `/sethome`（`slash_commands.py:2102`）调 `save_env_value` 只写 `.env` 文件 + `self.config`，不更新 `os.environ`。`.env` 要进程重启才进 os.environ → 没重启时每次新会话（`not history`）反复弹（注释说 one-time，实为 every-new-conversation）。**修复**：`run.py:10028` 加 `self.config.platforms[platform].home_channel` 回退检查（commit 4a7234c90，LOCAL 标记，进仓库 + 3 容器 docker cp + 重启）。ce545995 容器铁证：`.env` 有 `FEISHU_HOME_CHANNEL`，`/proc/1/environ` 没有。
+
+⚠️ **两处容器内改动重建会丢**：① adapter.py @_all 删除（容器内，镜像 build 于 07-01 没这改动）② run.py home_set 回退（仓库有但镜像没重建）。重建容器或镜像后需重做。adapter.py 未进仓库（用户定单用户），run.py 进仓库但镜像旧。根治需重建 hermes 镜像。📖 归档 Q
 
 ## 关联记忆
 - [[multiuserclaw-agent-naming]] [[multiuserclaw-channel-ui]]
