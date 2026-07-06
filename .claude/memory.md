@@ -143,7 +143,22 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
 
 **问题 2（home channel 反复弹，上游 bug）**：`run.py:10025-10044` 的"📬 No home channel"提示查 `os.getenv(env_key)`，但 `/sethome`（`slash_commands.py:2102`）调 `save_env_value` 只写 `.env` 文件 + `self.config`，不更新 `os.environ`。`.env` 要进程重启才进 os.environ → 没重启时每次新会话（`not history`）反复弹（注释说 one-time，实为 every-new-conversation）。**修复**：`run.py:10028` 加 `self.config.platforms[platform].home_channel` 回退检查（commit 4a7234c90，LOCAL 标记，进仓库 + 3 容器 docker cp + 重启）。ce545995 容器铁证：`.env` 有 `FEISHU_HOME_CHANNEL`，`/proc/1/environ` 没有。
 
-⚠️ **两处容器内改动重建会丢**：① adapter.py @_all 删除（容器内，镜像 build 于 07-01 没这改动）② run.py home_set 回退（仓库有但镜像没重建）。重建容器或镜像后需重做。adapter.py 未进仓库（用户定单用户），run.py 进仓库但镜像旧。根治需重建 hermes 镜像。📖 归档 Q
+⚠️ **改动持久性矩阵（2026-07-06）**：容器卷映射——`/opt/data`（config/.env/skills，**卷层**，重建保留）/ `/workspace`（**卷层**）/ `/opt/hermes/`（代码，**镜像层**，重建从镜像恢复）。本次三处改动分层：
+  - ① run.py home channel 修复（commit 4a7234c90，仓库有）：docker cp 进 `/opt/hermes/gateway/run.py`（镜像层）
+  - ② adapter.py @all 删两行：docker cp 进镜像层，**未进仓库**（用户定单用户）
+  - ③ alice 主模型 glm-5.1→gpt-5.4：sed `/opt/data/config.yaml`（**卷层**，永久）
+
+  | 场景 | ① run.py | ② adapter.py | ③ model |
+  |---|---|---|---|
+  | `docker restart`（进程重启） | ✅在 | ✅在 | ✅在 |
+  | 删容器重建（destroy+create） | ❌丢 | ❌丢 | ✅在 |
+  | **新用户**（manager.py 从镜像建容器） | ❌无 | ❌无 | vision=gpt-5.4✅，主模型看 settings.default_model |
+
+  **根治**：把 ①② 打进 hermes 镜像。② 先加回仓库（LOCAL 标记）→ 重建 hermes 镜像（⚠️ 必带 `--build-arg GITHUB_MIRROR=https://ghfast.top/` 否则 s6-overlay 超时）→ 老容器删了重建（`_container_matches_runtime` 不比镜像版本，#30）。在重建镜像前，①② 对新用户不生效，老用户重建容器后丢失需重做。
+
+**sethome 逻辑澄清**：home channel 是 hermes「默认投递 fallback」（未指定目标的消息/系统通知/cron 结果归宿），每个 bot 一个、`/sethome` 覆盖非叠加。**与会话隔离无关**——hermes 按 `chat_id` 分会话（session key = `agent:main:feishu:<dm|group>:<chat_id>:<on_xxx>`），每个群/单聊独立历史，bot 可同时在任意多 chat 对话。sethome 不限制对话地点。销售日报 cron（`deliver: local` + 脚本 hardcode `TEAM_CHAT=oc_90810ad2...` + `--route`）完全不走 home，sethome 到任何群都不影响日报推送。sethome 唯一实际效果：消「No home channel」提示 + 决定系统通知归宿。
+
+**模型排查教训（#44 漏网）**：alice 容器（9c0d224f）主模型一直是 glm-5.1，#44「全容器切 deepseek」时漏切/被改回 → glm-5.1 余额耗尽（`[1113]`）→ LLM 全挂 bot 不回复。切模型 sed 后**必须 /stop 当前卡住的 turn 再发新消息**（running turn 锁定旧 model，不重读 config；agent `_create_agent` 每**新** run 读盘）。验证：agent.log `conversation turn model=` + `Turn ended reason=text_response`。最终 alice 切 gpt-5.4（deepseek 直调也 None，glm 系列全余额不足）。📖 归档 Q
 
 ## 关联记忆
 - [[multiuserclaw-agent-naming]] [[multiuserclaw-channel-ui]]
