@@ -164,6 +164,20 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
 
 **bugfix PR 只提 johnson7788/MultiUserClaw**（2026-07-06）：[#57](https://github.com/johnson7788/MultiUserClaw/pull/57)（@all）、[#58](https://github.com/johnson7788/MultiUserClaw/pull/58)（home channel）。**NousResearch/hermes-agent 上游忽视不管**（#59347/#59348 留置），用户定「以后只关注 johnson7788」；`Mason-zy/hermes-agent` fork 闲置可删。提 PR 技巧：hermes-agent 大仓库 clone 超时 → `gh api contents` PUT 单文件（--input JSON 避免 ARG_MAX）；MultiUserClaw 本地有 clone → `git worktree` 隔离基于 upstream/main 建分支。注释风格见 CLAUDE.md（英文 + issue 号 + @Mason-zy，不带 LOCAL）。
 
+## 50. docker root 迁移到 500G 数据盘（2026-07-06 ✅）
+
+系统盘 vda 50G 紧张（65%），数据盘 vdb 500G 闲置（3%，挂 `/opt/applications`）。docker root + containerd 都迁到 `/opt/applications/data/`。
+
+**关键发现（踩坑）**：docker 用 containerd snapshotter 模式（`docker info` 显示 `driver-type: io.containerd.snapshotter.v1`），**镜像层在 `/var/lib/containerd`（18G），不在 `/var/lib/docker`（只 793M metadata + volumes）**。第一次只 rsync `/var/lib/docker`，启 docker 用新 data-root 后镜像层找不到（幸好回滚验证发现）。**迁移 docker root 必须连 containerd 一起迁**，否则镜像丢。
+
+**迁移步骤**：① 备份 daemon.json + `systemctl cat containerd > 备份` ② 停 `docker docker.socket containerd` ③ `rsync -aP /var/lib/{docker,containerd}/ /opt/applications/data/{docker,containerd}/` ④ docker `/etc/docker/daemon.json` 加 `"data-root": "/opt/applications/data/docker"` ⑤ containerd systemd override `/etc/systemd/system/containerd.service.d/override.conf`：`[Service]\nExecStart=\nExecStart=/usr/bin/containerd --root=/opt/applications/data/containerd`（containerd 无 config.toml，用 `--root` 参数最简，socket 仍走默认 `/run/containerd`） ⑥ `daemon-reload` + 启 containerd + docker ⑦ 8 容器 `unless-stopped` 自动恢复。
+
+**验证**：`docker info` Root Dir 新路径 + `docker images` 镜像完整（15 个）+ 8 容器 Up + postgres healthy + 卷挂载指数据盘 + gateway/hermes 功能正常。
+
+**待做**：旧 `/var/lib/docker` + `/var/lib/containerd` 还在系统盘（冗余，回滚保险），**观察稳定几小时后删**腾系统盘 ~30G。
+
+**收益**：以后 build hermes 镜像不怕磁盘满（500G 数据盘），根治上次 build 崩系统的磁盘满根因（系统盘 50G → 磁盘满 → postgres 写失败 → 连锁崩）。重建 hermes 镜像现在可安全做（代做清单"bridge 镜像 edge-tts"也可一并）。
+
 ## 关联记忆
 - [[multiuserclaw-agent-naming]] [[multiuserclaw-channel-ui]]
 - 详细过程归档 → `.claude/memory/archive-*.md`（入口 `.claude/memory/README.md`）
