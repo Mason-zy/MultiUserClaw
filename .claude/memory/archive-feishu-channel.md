@@ -169,3 +169,27 @@ device flow 参数 8 项 EXACT MATCH hermes 源码 ✓；commit 安全（sys.arg
 
 ---
 
+### 2026-07-06 @all 回复 + home channel 提示修复（#49）
+
+**问题 1 @all 回复（上游 #33723 设计）**：`adapter.py:4184` `_mentions_self` 对含 `@_all` 的消息 `return True` → `:4127` require_mention 门控通过 → bot 回复 @所有人。另两条路径（`_message_mentions_bot` 按 ID 严格匹配 / `_post_mentions_bot` 只看 `is_self`）不误判 @all。修复：删 `:4187-4188` 两行。commit `62da7583c` + 3 容器 docker cp `/opt/hermes/plugins/platforms/feishu/adapter.py`。
+
+**问题 2 home channel 反复弹（上游 #10581）**：`run.py:10025` 提示查 `os.getenv(env_key)`，但 `/sethome`（`slash_commands.py:2102`）的 `save_env_value` 只写 `.env` + `self.config`，不更 `os.environ`（要进程重启才进）→ 每次新会话（`not history`）反复弹（注释说 one-time 实为 every-new-conversation）。修复：`run.py:10028` 加 `self.config.platforms[platform].home_channel` 回退。commit `4a7234c90` + 3 容器 docker cp。铁证：ce545995 `.env` 有 `FEISHU_HOME_CHANNEL` 但 `/proc/1/environ` 没有。
+
+**持久性矩阵**：
+
+| 场景 | ① run.py | ② adapter.py | ③ model sed |
+|---|---|---|---|
+| `docker restart` | ✅ | ✅ | ✅ |
+| 删容器重建 | ❌丢（镜像层） | ❌丢 | ✅（卷层） |
+| 新用户 | ❌无 | ❌无 | vision gpt-5.4✅ |
+
+①② 在镜像层 `/opt/hermes/`，根治要重建 hermes 镜像（2026-07-06 进行中）。
+
+**sethome 逻辑**：home = 默认投递 fallback（未指定目标的消息/系统通知归宿），每 bot 一个、`/sethome` 覆盖非叠加。**不影响对话**（按 `chat_id` 分会话，每群/单聊独立）**不影响销售日报**（cron `deliver:local` + 脚本 hardcode `TEAM_CHAT=oc_90810ad2` + `--route`）。唯一效果：消提示 + 决定通知归宿。
+
+**模型切换教训**：alice（9c0d224f）主模型漏切 glm-5.1 → 余额耗尽 `[1113]` 全挂。切模型 sed 后**必须 /stop 卡住 turn 再发**（running turn 锁旧 model，`_create_agent` 每新 run 读盘）。验证：`agent.log` 的 `conversation turn model=` + `Turn ended`。
+
+**PR**：johnson7788 #57（@all）/ #58（home channel）。NousResearch #59347/#59348 忽视（用户定只关注 johnson7788）。提 PR 技巧：hermes-agent 大仓 clone 超时 → `gh api contents` PUT（--input JSON 避免 ARG_MAX）；MultiUserClaw 本地 → `git worktree` 隔离基于 upstream/main。
+
+---
+

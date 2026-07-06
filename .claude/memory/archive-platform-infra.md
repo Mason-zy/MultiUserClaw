@@ -201,3 +201,21 @@ proxy.py 读同一张表    admin.py      proxy.py:418         admin.py:405
 
 ---
 
+### 2026-07-06 docker root 迁 500G 数据盘（#50）
+
+系统盘 vda 50G 紧（65%）→ 数据盘 vdb 500G（`/opt/applications`，3% 用）。docker + containerd 都迁 `/opt/applications/data/`。
+
+**踩坑**：docker 用 containerd snapshotter（`docker info` 的 `driver-type: io.containerd.snapshotter.v1`），**镜像层在 `/var/lib/containerd`（18G），不在 `/var/lib/docker`（793M metadata）**。第一次只迁 docker，启 docker 用新 data-root 后镜像层丢（回滚发现）。**必须连 containerd 一起迁**。
+
+**步骤**：① 备份 daemon.json + `systemctl cat containerd` ② 停 `docker docker.socket containerd` ③ `rsync -aP /var/lib/{docker,containerd}/ /opt/applications/data/{docker,containerd}/` ④ docker `daemon.json` 加 `"data-root": "/opt/applications/data/docker"` ⑤ containerd systemd override `/etc/systemd/system/containerd.service.d/override.conf`：`ExecStart=/usr/bin/containerd --root=/opt/applications/data/containerd`（无 config.toml，socket 仍 `/run/containerd`）⑥ daemon-reload + 启 containerd + docker → 8 容器 unless-stopped 自动恢复。
+
+**验证**：`docker info` Root Dir 新路径 + 镜像 15 个完整 + 8 容器 Up + postgres healthy + 卷挂载指数据盘 + gateway/hermes 功能正常。
+
+**待做**：旧 `/var/lib/{docker,containerd}` 观察稳定后删腾系统盘 ~30G。
+
+**收益**：build hermes 镜像不怕磁盘满（根治上次 build 崩系统：系统盘满 → postgres 写失败 → 连锁崩）。
+
+**build arg 三件套**（`Dockerfile:31/32/66`，不传走官方源 CN 慢/挂）：`GITHUB_MIRROR=https://ghfast.top/`（s6-overlay）+ `APT_DEBIAN_MIRROR=https://mirrors.ustc.edu.cn/debian` + `APT_SECURITY_MIRROR=https://mirrors.ustc.edu.cn/debian-security` + `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`。build 不影响运行容器（锁定旧镜像 ID，不跟 latest tag）。
+
+---
+
