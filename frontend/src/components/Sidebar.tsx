@@ -8,16 +8,16 @@ import {
   Bot,
   Zap,
   Radio,
-  // Brain,    // 已禁用：AI模型导航
+  Brain,
   FolderOpen,
   BookOpen,
   MessageSquare,
   Clock,
   Monitor,
-  // Code2,     // 已禁用：API设定导航
+  Code2,
   Settings,
   User,
-  // Puzzle,    // 已禁用：插件管理导航
+  Puzzle,
   KeyRound,
   LogOut,
   X,
@@ -45,8 +45,8 @@ const navSections = [
     items: [
       { to: '/skills', icon: Zap, label: '技能商店' },
       { to: '/channels', icon: Radio, label: '渠道管理' },
-      // { to: '/plugins', icon: Puzzle, label: '插件管理' },  // 已禁用：插件管理目前无效
-      // { to: '/models', icon: Brain, label: 'AI 模型' },  // 已禁用：用户端模型配置实际无效，仅管理端生效
+      { to: '/plugins', icon: Puzzle, label: '插件管理' },
+      { to: '/models', icon: Brain, label: 'AI 模型' },
       { to: '/files', icon: FolderOpen, label: '文件管理' },
       { to: '/knowledge', icon: BookOpen, label: '知识库' },
     ],
@@ -57,8 +57,8 @@ const navSections = [
       { to: '/terminal', icon: Monitor, label: '实时终端' },
       { to: '/sessions', icon: MessageSquare, label: '会话历史' },
       { to: '/cron', icon: Clock, label: '定时任务' },
-      // { to: '/nodes', icon: Monitor, label: 'Node 管理' },   // 已禁用：Node 管理 API 永远返回空
-      // { to: '/api', icon: Code2, label: 'API设定' },         // 已禁用：API 设定
+      { to: '/nodes', icon: Monitor, label: 'Node 管理' },
+      { to: '/api', icon: Code2, label: 'API设定' },
       { to: '/settings', icon: Settings, label: '系统设置' },
     ],
   },

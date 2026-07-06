@@ -55,16 +55,6 @@ htmlcov/
 # Documentation
 *.md
 
-# Only ship the `main` system agent template into the image. The other
-# packaged agents are excluded so a brand-new user container syncs just
-# `main` as the default profile (see entrypoint.sh sync_nanobot_packaged_agents,
-# which copies every dir under deploy_copy/Agents/ to /opt/data/profiles/).
-deploy_copy/Agents/manager/
-deploy_copy/Agents/programmer/
-deploy_copy/Agents/researcher/
-deploy_copy/Agents/hr/
-deploy_copy/Agents/doctor/
-
 # Runtime data (bind-mounted at /opt/data; must not leak into build context)
 data/
 .hermes-docker/

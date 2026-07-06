@@ -496,15 +496,13 @@ async def resume_user_container(
 
 
 @router.get("/usage/summary")
-async def usage_summary(user_id: str | None = None, db: AsyncSession = Depends(get_db)):
-    """Global usage summary for the platform. LOCAL: 支持 user_id 筛选今日 token。"""
+async def usage_summary(db: AsyncSession = Depends(get_db)):
+    """Global usage summary for the platform."""
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    # LOCAL: 前端用量统计页选用户时，今日 token 按用户筛（total_users/active_containers 保持全局）
-    today_conditions = [UsageRecord.created_at >= today_start]
-    if user_id:
-        today_conditions.append(UsageRecord.user_id == user_id)
     total_today = (await db.execute(
-        select(func.coalesce(func.sum(UsageRecord.total_tokens), 0)).where(*today_conditions)
+        select(func.coalesce(func.sum(UsageRecord.total_tokens), 0)).where(
+            UsageRecord.created_at >= today_start,
+        )
     )).scalar_one()
     total_users = (await db.execute(select(func.count(User.id)))).scalar_one()
     
