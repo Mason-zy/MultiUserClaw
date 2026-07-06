@@ -1,5 +1,6 @@
 import sys
 import types
+import yaml
 from types import SimpleNamespace
 
 from app.config import Settings
@@ -94,6 +95,11 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     monkeypatch.setattr(manager.settings, "default_model", "claude-sonnet-4-5")
     monkeypatch.setattr(manager.settings, "hermes_api_toolsets", "none")
     monkeypatch.setattr(manager.settings, "container_tz", "Asia/Shanghai")
+    monkeypatch.setattr(
+        manager.settings,
+        "dedicated_hermes_user_site_path",
+        "/opt/data/.local/lib/python3.13/site-packages",
+    )
 
     env = manager._runtime_environment("container-token", "sso-token")
 
@@ -109,6 +115,10 @@ def test_hermes_runtime_environment_enables_api_server(monkeypatch):
     assert env["OPENAI_API_KEY"] == "proxy-key"
     assert env["HERMES_API_TOOLSETS"] == "none"
     assert env["INFOX_MED_TOKEN"] == "sso-token"
+    # Persisted user-site packages + default --user installs (see _runtime_environment).
+    assert env["PIP_USER"] == "1"
+    assert env["PIP_BREAK_SYSTEM_PACKAGES"] == "1"
+    assert env["PYTHONPATH"] == "/opt/data/.local/lib/python3.13/site-packages"
     assert "BRIDGE_ENABLE_CHANNELS" not in env
 
 
@@ -143,6 +153,13 @@ def test_build_hermes_runtime_files_support_platform_default_model(monkeypatch):
     assert 'HERMES_API_TOOLSETS=none' in env_file
     assert 'HERMES_REASONING_EFFORT=none' in env_file
     assert 'HERMES_SERVICE_TIER=' in env_file
+
+    parsed = yaml.safe_load(config_yaml)
+    assert parsed["auxiliary"]["vision"]["provider"] == "custom"
+    assert parsed["auxiliary"]["vision"]["model"] == "openai/gpt-5.4"
+    assert parsed["auxiliary"]["vision"]["base_url"] == "http://gateway:8080/llm/v1"
+    # api_key 不在基础 config_yaml 里——由 _write_hermes_runtime_files 从容器 env
+    # NANOBOT_PROXY__TOKEN 读取真实 token 注入，保证每容器用自己唯一的 container_token。
 
 
 def test_write_hermes_runtime_files_repairs_data_volume_ownership(monkeypatch):

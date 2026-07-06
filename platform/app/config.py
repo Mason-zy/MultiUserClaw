@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     dedicated_hermes_default_provider: str = "custom"
     dedicated_hermes_default_base_url: str = "http://gateway:8080/llm/v1"
     dedicated_hermes_default_api_key: str = "platform-proxy"
+    dedicated_hermes_default_vision_model: str = "openai/gpt-5.4"
+    # PYTHONPATH injected into hermes containers so the isolated venv
+    # (/opt/hermes/.venv, include-system-site-packages=false) picks up packages the
+    # user installs via `pip install --user` into the persisted /opt/data volume.
+    dedicated_hermes_user_site_path: str = "/opt/data/.local/lib/python3.13/site-packages"
     dedicated_runtime_container_name_prefix: str = "hermes-user"
     dedicated_runtime_data_volume_prefix: str = "hermes-data"
     container_network: str = "openclaw-internal"
@@ -69,7 +74,7 @@ class Settings(BaseSettings):
     shared_openclaw_timeout_seconds: int = 120
     shared_openclaw_system_token: str = ""
     user_container_publish_ports: bool = True
-    user_container_bind_ip: str = "0.0.0.0"
+    user_container_bind_ip: str = "127.0.0.1"
     container_tz: str = "Asia/Shanghai"
     # 🟢 提升资源限制（适合浏览器/agent）
     container_memory_limit: str = "2g"  # 原来 512m
@@ -116,6 +121,13 @@ class Settings(BaseSettings):
     training_trace_ingest_token: str = ""
     training_trace_dir: str = ".hermes/training_traces"
     training_trace_hash_salt: str = ""
+
+    # Feishu SSO (read from env; never hardcode secrets)
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    feishu_base_url: str = "https://open.feishu.cn/open-apis"
+    feishu_callback_url: str = ""
+    feishu_frontend_redirect_url: str = ""
 
     model_config = {"env_prefix": "PLATFORM_"}
 

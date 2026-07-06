@@ -142,7 +142,7 @@ export default function TerminalPage() {
     <div className="flex h-[calc(100vh-7.5rem)] flex-col">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-dark-text">实时终端</h1>
-        <p className="mt-1 text-sm text-dark-text-secondary">完整终端（xterm.js + PTY），支持方向键、Tab 补全、TUI 向导（vi/top/htop）。直接在此输入命令即可。</p>
+        <p className="mt-1 text-sm text-dark-text-secondary">完整终端（xterm.js + PTY），支持方向键、Tab 补全、TUI 向导（vi/top/htop）和扫码二维码。直接在此输入命令即可。</p>
       </div>
 
       {error && (

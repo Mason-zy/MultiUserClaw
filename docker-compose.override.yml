@@ -1,0 +1,28 @@
+# 本地覆盖：让 postgres 用全新空卷 pgdata_new
+# 老卷 openclaw_pgdata 被 stopped 容器引用着，原样保留
+# 回滚方法：rm docker-compose.override.yml
+services:
+  postgres:
+    volumes:
+      - pgdata_new:/var/lib/postgresql/data
+  gateway:
+    environment:
+      # LOCAL: 钉死 hermes config.yaml 的 model.provider=platform-gateway（config.py 默认 "custom" hermes 不认→fallback auto→openrouter 401）
+      PLATFORM_DEDICATED_HERMES_DEFAULT_PROVIDER: platform-gateway
+      PLATFORM_FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      PLATFORM_FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      PLATFORM_FEISHU_CALLBACK_URL: ${FEISHU_CALLBACK_URL:-}
+      PLATFORM_FEISHU_FRONTEND_REDIRECT_URL: ${FEISHU_FRONTEND_REDIRECT_URL:-}
+  # LOCAL: 云安全组只开放 8000-9000，前端系追加映射到该区间（原 3080/3081/3082 仍映射但外部不可达）
+  frontend:
+    ports:
+      - "8180:3000"
+  manage-front:
+    ports:
+      - "8181:3000"
+  simple-front:
+    ports:
+      - "8182:3000"
+
+volumes:
+  pgdata_new:

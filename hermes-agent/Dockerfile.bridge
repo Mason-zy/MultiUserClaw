@@ -54,16 +54,21 @@ COPY --chown=hermes:hermes pyproject.toml ./
 COPY --chown=hermes:hermes acp_adapter agent cron gateway hermes_cli plugins tools ./
 COPY --chown=hermes:hermes batch_runner.py cli.py hermes_constants.py hermes_logging.py hermes_state.py hermes_time.py model_tools.py run_agent.py setup.py toolset_distributions.py toolsets.py trajectory_compressor.py utils.py ./
 
-# The base image (hermes-base) makes /opt/hermes immutable for the runtime
-# user: `chown -R root:root` + `chmod -R a-w`. Restore hermes ownership AND
-# owner-write so the venv install + frontend build below can write here.
-RUN chown -R hermes:hermes /opt/hermes && \
-    chmod -R u+w /opt/hermes
+# LOCAL: base 已用部分可写 seal（hermes-agent/Dockerfile 不加 a-w），所以 bridge 不需要
+# 全树 chown —— 那会在 overlay2 上遍历百万 inode 卡 ~26 分钟（见 .claude/memory.md 第40节）。
+# base 还归 root 的 build 写入点有两个：web/node_modules（npm install root 装）+
+# hermes_cli/（base 的 npm run build 生成 vite outDir=../hermes_cli/web_dist，seal 不翻它；
+# base 的 COPY . . 也无 --chown，hermes_cli 源码整树 root）。bridge 的 npm run build 要写
+# web/node_modules/.tmp/.vite + vite emptyOutDir 重写 hermes_cli/web_dist，解锁
+# web/node_modules + hermes_cli 这两个子树即可（小源码树，不触 26 分钟遍历）；
+# .venv/ui-tui base seal 已 chown hermes。
+RUN chown -R hermes:hermes /opt/hermes/web/node_modules /opt/hermes/hermes_cli
 USER hermes
+# LOCAL: 预装 edge-tts==7.2.7 避免 hermes 运行时 lazy_deps 现装（首条消息会卡 ~4 分钟，见 CLAUDE.md「hermes 容器排查约定」）
 RUN if [ ! -d /opt/hermes/.venv ]; then uv venv --seed /opt/hermes/.venv; fi && \
     uv pip install --no-cache-dir -i ${PIP_INDEX_URL} setuptools wheel weasyprint \
-        pymupdf pdfplumber python-docx openpyxl python-pptx pandas xlrd odfpy python-magic chardet && \
-    uv pip install --no-build-isolation --no-cache-dir -i ${PIP_INDEX_URL} --extra-index-url https://pypi.org/simple/ -e ".[all]"
+        pymupdf pdfplumber python-docx openpyxl python-pptx pandas xlrd odfpy python-magic chardet edge-tts==7.2.7 && \
+    uv pip install --no-build-isolation --no-cache-dir -i ${PIP_INDEX_URL} --extra-index-url https://pypi.org/simple/ -e ".[all,feishu]"
 
 COPY --chown=hermes:hermes . /opt/hermes
 

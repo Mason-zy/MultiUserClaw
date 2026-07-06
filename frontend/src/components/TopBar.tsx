@@ -1,4 +1,4 @@
-import { Settings, LogOut } from 'lucide-react'
+import { Settings, LogOut, BookOpen } from 'lucide-react'
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ping, logout, getContainerInfo } from '../lib/api'
@@ -144,6 +144,17 @@ export default function TopBar() {
           />
           {statusConfig.text}
         </div>
+
+        {/* LOCAL: 说明文档（飞书），新标签打开 */}
+        <a
+          href="https://fjdynamics.feishu.cn/docx/GHBudSSgyo3uocxfFnicoJvPn4e"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-dark-text-secondary hover:text-dark-text transition-colors"
+          title="使用说明文档"
+        >
+          <BookOpen size={20} />
+        </a>
 
         {/* 主题切换 */}
         <ThemeToggle />

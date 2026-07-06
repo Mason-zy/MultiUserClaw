@@ -144,7 +144,7 @@ export function getRefreshToken(): string | null {
   return localStorage.getItem(REFRESH_TOKEN_KEY)
 }
 
-function setTokens(access: string, refresh: string): void {
+export function setTokens(access: string, refresh: string): void {
   localStorage.setItem(ACCESS_TOKEN_KEY, access)
   localStorage.setItem(REFRESH_TOKEN_KEY, refresh)
 }
@@ -940,6 +940,52 @@ export async function deleteChannelConfig(channelType: string): Promise<{ ok: bo
 export async function restartGateway(): Promise<{ success: boolean; message: string }> {
   return fetchJSON<{ success: boolean; message: string }>('/api/openclaw/settings/gateway/restart', {
     method: 'POST',
+  })
+}
+
+export async function restartUserContainer(): Promise<{ success: boolean; restarted: boolean }> {
+  return fetchJSON<{ success: boolean; restarted: boolean }>('/api/openclaw/container/restart', {
+    method: 'POST',
+  })
+}
+
+export interface FeishuOnboardBegin {
+  qr_url: string
+  device_code: string
+  interval: number
+  expire_in: number
+  domain: string
+}
+
+export async function feishuOnboardBegin(): Promise<FeishuOnboardBegin> {
+  return fetchJSON<FeishuOnboardBegin>('/api/openclaw/feishu/onboard/begin', { method: 'POST' })
+}
+
+export interface FeishuOnboardPoll {
+  status: 'pending' | 'success' | 'access_denied' | 'expired_token'
+  app_id?: string
+  app_secret?: string
+  domain?: string
+  open_id?: string
+  error?: string
+}
+
+export async function feishuOnboardPoll(device_code: string, domain: string): Promise<FeishuOnboardPoll> {
+  return fetchJSON<FeishuOnboardPoll>('/api/openclaw/feishu/onboard/poll', {
+    method: 'POST',
+    body: JSON.stringify({ device_code, domain }),
+  })
+}
+
+export async function feishuOnboardCommit(
+  app_id: string,
+  app_secret: string,
+  domain: string,
+  open_id?: string,
+): Promise<{ success: boolean; restarted: boolean; home_channel_set?: boolean }> {
+  return fetchJSON<{ success: boolean; restarted: boolean; home_channel_set?: boolean }>('/api/openclaw/feishu/onboard/commit', {
+    method: 'POST',
+    body: JSON.stringify({ app_id, app_secret, domain, open_id }),
   })
 }
 

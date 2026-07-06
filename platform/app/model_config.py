@@ -45,7 +45,7 @@ PROVIDER_PRESETS: dict[str, ProviderPreset] = {
         name="OpenAI",
         provider_type="openai",
         api_base=None,
-        models=(("gpt-5.4", "GPT-5.4"), ("gpt-5.4-mini", "GPT-5.4 Mini")),
+        models=(("gpt-5.4", "GPT-5.4"), ("gpt-5.4-mini", "GPT-5.4 Mini"), ("glm-5-turbo", "GLM 5 Turbo"), ("glm-5.1", "GLM 5.1")),
         key_attr="openai_api_key",
         base_attr="openai_api_base",
     ),

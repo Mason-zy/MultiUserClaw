@@ -13,13 +13,14 @@ name: openclaw
 services:
   postgres:
     container_name: openclaw-postgres
+    restart: unless-stopped
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: nanobot
-      POSTGRES_PASSWORD: nanobot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
       POSTGRES_DB: nanobot_platform
     ports:
-      - "15432:5432"
+      - "9901:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -32,6 +33,7 @@ services:
 
   gateway:
     container_name: openclaw-gateway
+    restart: unless-stopped
     build:
       context: ./platform
       args:
@@ -39,7 +41,7 @@ services:
         APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-http://mirrors.ustc.edu.cn/debian-security}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     ports:
-      - "8080:8080"
+      - "9900:8080"
     environment:
       PLATFORM_DATABASE_URL: postgresql+asyncpg://nanobot:nanobot@postgres:5432/nanobot_platform
       PLATFORM_JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
@@ -109,6 +111,7 @@ services:
 
   frontend:
     container_name: openclaw-frontend
+    restart: unless-stopped
     build:
       context: ./frontend
       args:
@@ -122,6 +125,7 @@ services:
 
   manage-front:
     container_name: openclaw-manage
+    restart: unless-stopped
     build: ./manage_front
     ports:
       - "3081:3000"
@@ -134,6 +138,7 @@ services:
 
   simple-front:
     container_name: openclaw-simple
+    restart: unless-stopped
     build:
       context: ./simple_front
       args:
