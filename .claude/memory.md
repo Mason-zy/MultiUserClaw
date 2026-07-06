@@ -145,7 +145,7 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
 
 ⚠️ **改动持久性矩阵（2026-07-06）**：容器卷映射——`/opt/data`（config/.env/skills，**卷层**，重建保留）/ `/workspace`（**卷层**）/ `/opt/hermes/`（代码，**镜像层**，重建从镜像恢复）。本次三处改动分层：
   - ① run.py home channel 修复（commit 4a7234c90，仓库有）：docker cp 进 `/opt/hermes/gateway/run.py`（镜像层）
-  - ② adapter.py @all 删两行：docker cp 进镜像层，**未进仓库**（用户定单用户）
+  - ② adapter.py @all 删两行：docker cp 进镜像层 + **进仓库**（commit 62da7583c，带 LOCAL 注释）
   - ③ alice 主模型 glm-5.1→gpt-5.4：sed `/opt/data/config.yaml`（**卷层**，永久）
 
   | 场景 | ① run.py | ② adapter.py | ③ model |
@@ -154,7 +154,7 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
   | 删容器重建（destroy+create） | ❌丢 | ❌丢 | ✅在 |
   | **新用户**（manager.py 从镜像建容器） | ❌无 | ❌无 | vision=gpt-5.4✅，主模型看 settings.default_model |
 
-  **根治**：把 ①② 打进 hermes 镜像。② 先加回仓库（LOCAL 标记）→ 重建 hermes 镜像（⚠️ 必带 `--build-arg GITHUB_MIRROR=https://ghfast.top/` 否则 s6-overlay 超时）→ 老容器删了重建（`_container_matches_runtime` 不比镜像版本，#30）。在重建镜像前，①② 对新用户不生效，老用户重建容器后丢失需重做。
+  **根治**：把 ①② 打进 hermes 镜像。①② 已都在仓库（run.py `4a7234c90`、adapter.py `62da7583c`）→ 重建 hermes 镜像（⚠️ 必带 `--build-arg GITHUB_MIRROR=https://ghfast.top/` 否则 s6-overlay 超时）→ 老容器删了重建（`_container_matches_runtime` 不比镜像版本，#30）。重建镜像前：①② 对新用户不生效（镜像旧），老用户删容器重建后丢失需重做。
 
 **sethome 逻辑澄清**：home channel 是 hermes「默认投递 fallback」（未指定目标的消息/系统通知/cron 结果归宿），每个 bot 一个、`/sethome` 覆盖非叠加。**与会话隔离无关**——hermes 按 `chat_id` 分会话（session key = `agent:main:feishu:<dm|group>:<chat_id>:<on_xxx>`），每个群/单聊独立历史，bot 可同时在任意多 chat 对话。sethome 不限制对话地点。销售日报 cron（`deliver: local` + 脚本 hardcode `TEAM_CHAT=oc_90810ad2...` + `--route`）完全不走 home，sethome 到任何群都不影响日报推送。sethome 唯一实际效果：消「No home channel」提示 + 决定系统通知归宿。
 
