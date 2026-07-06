@@ -59,6 +59,7 @@ cache
 .codex
 .hermes
 .qoder
+.claude
 
 # Local planning and agent scratch docs. Use `git add -f docs/<path>` for shared docs.
 docs/
