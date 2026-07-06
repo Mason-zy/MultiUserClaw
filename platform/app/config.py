@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     dedicated_hermes_default_base_url: str = "http://gateway:8080/llm/v1"
     dedicated_hermes_default_api_key: str = "platform-proxy"
     dedicated_hermes_default_vision_model: str = "openai/gpt-5.4"
+    # LOCAL: 新用户默认禁用的 skills（激进精简，留 9 通用分类）。env
+    # PLATFORM_DEDICATED_HERMES_DEFAULT_DISABLED_SKILLS 覆盖（逗号分隔 skill name）。
+    dedicated_hermes_default_disabled_skills: str = "apple-notes,apple-reminders,architecture-diagram,ascii-art,ascii-video,baoyu-comic,baoyu-infographic,claude-code,claude-design,codebase-inspection,codex,comfyui,debugging-hermes-tui-commands,design-md,dogfood,excalidraw,findmy,github-auth,github-code-review,github-issues,github-pr-workflow,github-repo-management,hermes-agent,hermes-agent-skill-authoring,huggingface-hub,humanizer,ideation,imessage,manim-video,node-inspect-debugger,opencode,openhue,p5js,pixel-art,plan,popular-web-designs,pretext,python-debugpy,requesting-code-review,simplify-code,sketch,songwriting-and-ai-music,spike,subagent-driven-development,systematic-debugging,test-driven-development,touchdesigner-mcp,writing-plans,xurl,yuanbao"
     dedicated_runtime_container_name_prefix: str = "hermes-user"
     dedicated_runtime_data_volume_prefix: str = "hermes-data"
     container_network: str = "openclaw-internal"
@@ -70,7 +73,7 @@ class Settings(BaseSettings):
     shared_openclaw_timeout_seconds: int = 120
     shared_openclaw_system_token: str = ""
     user_container_publish_ports: bool = True
-    user_container_bind_ip: str = "0.0.0.0"
+    user_container_bind_ip: str = "127.0.0.1"
     container_tz: str = "Asia/Shanghai"
     # 🟢 提升资源限制（适合浏览器/agent）
     container_memory_limit: str = "2g"  # 原来 512m

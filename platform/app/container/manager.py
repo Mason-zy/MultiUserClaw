@@ -243,6 +243,12 @@ def _build_hermes_config_yaml() -> str:
             },
         },
     }
+    # LOCAL: 新用户默认禁用非核心 skills（激进精简，留 9 通用分类：agent-browser/
+    # computer-use/email/note-taking/pptx/productivity/research/media/data-science）。
+    # disabled 按 skill name 匹配，用户可 `hermes skills enable <name>` 随时开。
+    disabled_skills = [s.strip() for s in settings.dedicated_hermes_default_disabled_skills.split(",") if s.strip()]
+    if disabled_skills:
+        config["skills"] = {"disabled": disabled_skills}
     return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
 
 
@@ -474,6 +480,11 @@ def _write_hermes_runtime_files(container: docker.models.containers.Container) -
             if env_var.startswith("NANOBOT_PROXY__TOKEN="):
                 platform_config["auxiliary"]["vision"]["api_key"] = env_var.split("=", 1)[1]
                 break
+
+    # LOCAL: 保留老用户改过的 skills 配置（用户可能 `hermes skills enable` 开过某些
+    # default disabled 的）。新用户用 _build 的 default disabled；老用户重建时 existing 优先。
+    if existing_config.get("skills"):
+        platform_config["skills"] = existing_config["skills"]
 
     if existing_config.get("custom_providers"):
         user_providers = [
