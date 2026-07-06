@@ -61,14 +61,25 @@ RUN if [ -n "${APT_DEBIAN_MIRROR}" ]; then \
 # `.sha256` files from the corresponding release and update the ARGs. The
 # checksum lookup happens during build, so a compromised release artifact
 # fails the build loudly instead of silently producing a tampered image.
+#
+# Optional GitHub mirror prefix for environments where direct github.com
+# downloads are blocked or unreliable. Default empty string means the official
+# github.com is used verbatim (zero behavior change). To inject a mirror, pass
+# `--build-arg GITHUB_MIRROR=<mirror-prefix>/` at build time; the value MUST end
+# with a trailing slash so it composes correctly into the URL (e.g. the default
+# empty prefix yields the raw github.com URL, a mirror prefix yields
+# `<mirror-prefix>/https://github.com/...` for proxy-style mirrors). The SHA256
+# verification below is unaffected, so a tampered or MitM'd artifact still fails
+# the build loudly. Consistent with the APT_*_MIRROR ARGs above.
+ARG GITHUB_MIRROR=""
 ARG TARGETARCH
 ARG S6_OVERLAY_VERSION=3.2.3.0
 ARG S6_OVERLAY_NOARCH_SHA256=b720f9d9340efc8bb07528b9743813c836e4b02f8693d90241f047998b4c53cf
 ARG S6_OVERLAY_X86_64_SHA256=a93f02882c6ed46b21e7adb5c0add86154f01236c93cd82c7d682722e8840563
 ARG S6_OVERLAY_AARCH64_SHA256=0952056ff913482163cc30e35b2e944b507ba1025d78f5becbb89367bf344581
 ARG S6_OVERLAY_SYMLINKS_SHA256=a60dc5235de3ecbcf874b9c1f18d73263ab99b289b9329aa950e8729c4789f0e
-ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp/
-ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-symlinks-noarch.tar.xz /tmp/
+ADD ${GITHUB_MIRROR}https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp/
+ADD ${GITHUB_MIRROR}https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-symlinks-noarch.tar.xz /tmp/
 RUN set -eu; \
     case "${TARGETARCH:-amd64}" in \
         amd64) s6_arch="x86_64"; s6_arch_sha="${S6_OVERLAY_X86_64_SHA256}" ;; \
@@ -76,7 +87,7 @@ RUN set -eu; \
         *) echo "Unsupported TARGETARCH=${TARGETARCH} for s6-overlay" >&2; exit 1 ;; \
     esac; \
     curl -fsSL --retry 3 -o /tmp/s6-overlay-arch.tar.xz \
-        "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${s6_arch}.tar.xz"; \
+        "${GITHUB_MIRROR}https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${s6_arch}.tar.xz"; \
     { \
         printf '%s  %s\n' "${S6_OVERLAY_NOARCH_SHA256}" /tmp/s6-overlay-noarch.tar.xz; \
         printf '%s  %s\n' "${s6_arch_sha}" /tmp/s6-overlay-arch.tar.xz; \
