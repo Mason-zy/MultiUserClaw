@@ -10025,9 +10025,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
-            # LOCAL: /sethome 写 .env + self.config.platforms[platform].home_channel，
-            # 但 .env 要进程重启才进 os.environ；没重启时 os.getenv 拿不到，会每次新会话
-            # 反复弹提示。回退查 self.config（sethome 已即时写入），任一命中就视为已设置。
+            # Fix #10581: /sethome persists to .env + self.config, but .env only
+            # enters os.environ after a restart, so os.getenv() missed it and the
+            # "No home channel" prompt refired every new session. Fall back to
+            # self.config (updated immediately by sethome). (@Mason-zy)
             _home_set = bool(os.getenv(env_key))
             if not _home_set:
                 _pcfg = None

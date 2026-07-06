@@ -4182,7 +4182,8 @@ class FeishuAdapter(BasePlatformAdapter):
     # --- Mention detection ----------------------------------------------------
 
     def _mentions_self(self, message: Any) -> bool:
-        # LOCAL: @_all (@所有人) 不再算 bot 被提及，避免群 @所有人 触发回复（上游 #33723 未修）。
+        # Fix #33723: @_all (@everyone) no longer treated as self-mention —
+        # stops the bot replying to every @所有人 group announcement. (@Mason-zy)
         raw_content = getattr(message, "content", "") or ""
         mentions = getattr(message, "mentions", None) or []
         if mentions and self._message_mentions_bot(mentions):
