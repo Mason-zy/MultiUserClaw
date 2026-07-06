@@ -160,6 +160,8 @@ SSH key：`~/.ssh/id_ed25519_to_hosting`（公钥已注册 Mason-zy 账号）。
 
 **模型排查教训（#44 漏网）**：alice 容器（9c0d224f）主模型一直是 glm-5.1，#44「全容器切 deepseek」时漏切/被改回 → glm-5.1 余额耗尽（`[1113]`）→ LLM 全挂 bot 不回复。切模型 sed 后**必须 /stop 当前卡住的 turn 再发新消息**（running turn 锁定旧 model，不重读 config；agent `_create_agent` 每**新** run 读盘）。验证：agent.log `conversation turn model=` + `Turn ended reason=text_response`。最终 alice 切 gpt-5.4（deepseek 直调也 None，glm 系列全余额不足）。📖 归档 Q
 
+**4 个 PR 已提上游（2026-07-06）**：①② 同时提 NousResearch/hermes-agent + johnson7788/MultiUserClaw，每 fix 独立 PR。hermes-agent 官方：[#59347](https://github.com/NousResearch/hermes-agent/pull/59347)（@all / #33723）、[#59348](https://github.com/NousResearch/hermes-agent/pull/59348)（home channel / #10581）；MultiUserClaw：[#57](https://github.com/johnson7788/MultiUserClaw/pull/57)（@all）、[#58](https://github.com/johnson7788/MultiUserClaw/pull/58)（home channel）。新建 fork `Mason-zy/hermes-agent`。提 PR 技巧：hermes-agent 仓库大 clone 超时 → 用 `gh api contents` PUT 单文件提交（--input JSON 避免 ARG_MAX），不用本地 clone；MultiUserClaw 本地有 clone → `git worktree` 隔离基于 upstream/main 建分支。等 review，可能要按上游意见调整（如 #33723 建议的 `FEISHU_IGNORE_MENTION_ALL` 配置项方案）。
+
 ## 关联记忆
 - [[multiuserclaw-agent-naming]] [[multiuserclaw-channel-ui]]
 - 详细过程归档 → `.claude/memory/archive-*.md`（入口 `.claude/memory/README.md`）
