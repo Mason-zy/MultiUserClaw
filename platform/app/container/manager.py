@@ -150,6 +150,20 @@ def _runtime_environment(container_token: str, sso_token: str | None) -> dict[st
                 "HERMES_REASONING_EFFORT": settings.hermes_reasoning_effort,
                 "HERMES_SERVICE_TIER": settings.hermes_service_tier,
                 "HERMES_YOLO_MODE": "true",
+                # hermes runs an isolated venv (include-system-site-packages=false,
+                # ENABLE_USER_SITE=False): `pip install` lands in the system site (invisible
+                # to the venv), `pip install --user` in the user site (also invisible), and
+                # venv installs land in the ephemeral container layer. Three envs make a
+                # user's `pip install xxx` Just Work and survive rebuilds:
+                #   PIP_USER=1                   → install into the user site
+                #   PIP_BREAK_SYSTEM_PACKAGES=1  → bypass PEP 668 (system pip is externally
+                #                                  managed; user site is safe, single-user box)
+                #   PYTHONPATH                   → expose the persisted user site to the venv
+                # User site is /opt/data/.local (hermes HOME per Dockerfile), a persisted
+                # volume. Single-user-per-container, so no cross-user risk.
+                "PIP_USER": "1",
+                "PIP_BREAK_SYSTEM_PACKAGES": "1",
+                "PYTHONPATH": settings.dedicated_hermes_user_site_path,
             }
         )
     if sso_token:
@@ -243,12 +257,6 @@ def _build_hermes_config_yaml() -> str:
             },
         },
     }
-    # LOCAL: 新用户默认禁用非核心 skills（激进精简，留 9 通用分类：agent-browser/
-    # computer-use/email/note-taking/pptx/productivity/research/media/data-science）。
-    # disabled 按 skill name 匹配，用户可 `hermes skills enable <name>` 随时开。
-    disabled_skills = [s.strip() for s in settings.dedicated_hermes_default_disabled_skills.split(",") if s.strip()]
-    if disabled_skills:
-        config["skills"] = {"disabled": disabled_skills}
     return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
 
 
@@ -480,11 +488,6 @@ def _write_hermes_runtime_files(container: docker.models.containers.Container) -
             if env_var.startswith("NANOBOT_PROXY__TOKEN="):
                 platform_config["auxiliary"]["vision"]["api_key"] = env_var.split("=", 1)[1]
                 break
-
-    # LOCAL: 保留老用户改过的 skills 配置（用户可能 `hermes skills enable` 开过某些
-    # default disabled 的）。新用户用 _build 的 default disabled；老用户重建时 existing 优先。
-    if existing_config.get("skills"):
-        platform_config["skills"] = existing_config["skills"]
 
     if existing_config.get("custom_providers"):
         user_providers = [
