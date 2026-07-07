@@ -155,10 +155,10 @@ def _runtime_environment(container_token: str, sso_token: str | None) -> dict[st
                 # to the venv), `pip install --user` in the user site (also invisible), and
                 # venv installs land in the ephemeral container layer. Three envs make a
                 # user's `pip install xxx` Just Work and survive rebuilds:
-                #   PIP_USER=1                   → install into the user site
-                #   PIP_BREAK_SYSTEM_PACKAGES=1  → bypass PEP 668 (system pip is externally
+                #   PIP_USER=1                   -> install into the user site
+                #   PIP_BREAK_SYSTEM_PACKAGES=1  -> bypass PEP 668 (system pip is externally
                 #                                  managed; user site is safe, single-user box)
-                #   PYTHONPATH                   → expose the persisted user site to the venv
+                #   PYTHONPATH                   -> expose the persisted user site to the venv
                 # User site is /opt/data/.local (hermes HOME per Dockerfile), a persisted
                 # volume. Single-user-per-container, so no cross-user risk.
                 "PIP_USER": "1",
@@ -245,16 +245,6 @@ def _build_hermes_config_yaml() -> str:
         "agent": {
             "reasoning_effort": settings.hermes_reasoning_effort,
             "service_tier": settings.hermes_service_tier,
-        },
-        # LOCAL: TASK-1 — 注入 auxiliary.vision 配置，让 hermes 容器内 vision 走平台 gateway 代理。
-        # api_key 不在此处写死——每容器有自己唯一的 container_token（存 env NANOBOT_PROXY__TOKEN），
-        # 由 _write_hermes_runtime_files() 从容器 env 读取并注入，确保 gateway 鉴权通过。
-        "auxiliary": {
-            "vision": {
-                "provider": "custom",
-                "model": settings.dedicated_hermes_default_vision_model,
-                "base_url": settings.dedicated_hermes_default_base_url,
-            },
         },
     }
     return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
@@ -480,14 +470,6 @@ def _read_existing_hermes_env_channel_vars(container: docker.models.containers.C
 def _write_hermes_runtime_files(container: docker.models.containers.Container) -> None:
     platform_config = yaml.safe_load(_build_hermes_config_yaml()) or {}
     existing_config = _read_existing_hermes_config(container)
-
-    # LOCAL: TASK-1 — 从容器 env 读取真实 container_token 注入 auxiliary.vision.api_key，
-    # 确保 hermes vision 客户端鉴权通过 gateway（不能用 "platform-proxy"）。
-    if platform_config.get("auxiliary", {}).get("vision"):
-        for env_var in container.attrs.get("Config", {}).get("Env", []):
-            if env_var.startswith("NANOBOT_PROXY__TOKEN="):
-                platform_config["auxiliary"]["vision"]["api_key"] = env_var.split("=", 1)[1]
-                break
 
     if existing_config.get("custom_providers"):
         user_providers = [

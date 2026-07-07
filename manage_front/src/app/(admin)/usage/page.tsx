@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { getUsageSummary, getUsageHistory, getUsers } from "@/lib/api";
-import type { UsageSummary, UsageHistory, UserSummary } from "@/types";
-import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
+import { getUsageSummary, getUsageHistory } from "@/lib/api";
+import type { UsageSummary, UsageHistory } from "@/types";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar,
@@ -13,28 +12,13 @@ import {
 export default function UsagePage() {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [history, setHistory] = useState<UsageHistory | null>(null);
-  const [users, setUsers] = useState<UserSummary[]>([]);
-  const [selectedUserId, setSelectedUserId] = useState<string>(""); // "" = All
   const [loading, setLoading] = useState(true);
 
-  // 用户列表只拉一次（取前 1000 个，够 MVP）
   useEffect(() => {
-    getUsers(1, 1000).then((r) => setUsers(r.items ?? [])).catch(() => {});
-  }, []);
-
-  // summary + history 均按选中用户筛选（后端 /usage/summary 和 /usage/history 都已支持 user_id）
-  useEffect(() => {
-    setLoading(true);
-    Promise.all([
-      getUsageSummary(selectedUserId || undefined),
-      getUsageHistory(30, selectedUserId || undefined),
-    ])
+    Promise.all([getUsageSummary(), getUsageHistory(30)])
       .then(([s, h]) => { setSummary(s); setHistory(h); })
       .finally(() => setLoading(false));
-  }, [selectedUserId]);
-
-  const selectedUser = users.find((u) => u.id === selectedUserId);
-  const scopeLabel = selectedUser ? ` — ${selectedUser.username}` : " — 全部用户";
+  }, []);
 
   if (loading) return <p className="text-gray-500">加载中...</p>;
 
@@ -42,27 +26,9 @@ export default function UsagePage() {
     <div>
       <h2 className="text-2xl font-bold mb-6">用量统计</h2>
 
-      {/* LOCAL: 用户筛选 MVP（单选 + All）；summary 今日 token + history 均按 user_id 筛选（后端都已支持），total_users/active_containers 保持全局 */}
       <Card className="mb-6">
         <CardHeader>
-          <CardTitle className="text-sm text-gray-500">用户筛选</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Select value={selectedUserId || "all"} onValueChange={(v) => setSelectedUserId(v && v !== "all" ? v : "")}>
-            <SelectTrigger className="w-72">{selectedUser ? selectedUser.username : "全部用户（All）"}</SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部用户（All）</SelectItem>
-              {users.map((u) => (
-                <SelectItem key={u.id} value={u.id}>{u.username}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </CardContent>
-      </Card>
-
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="text-sm text-gray-500">今日 Token 总用量{scopeLabel}</CardTitle>
+          <CardTitle className="text-sm text-gray-500">今日 Token 总用量</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="text-3xl font-bold">
@@ -73,7 +39,7 @@ export default function UsagePage() {
 
       <Card className="mb-6">
         <CardHeader>
-          <CardTitle>每日用量趋势 (近30天){scopeLabel}</CardTitle>
+          <CardTitle>每日用量趋势 (近30天)</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="h-80">
@@ -94,7 +60,7 @@ export default function UsagePage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>各模型用量{scopeLabel}</CardTitle>
+          <CardTitle>各模型用量</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="h-80">

@@ -101,23 +101,6 @@ export default function Login() {
           </button>
         </form>
 
-        {/* Feishu SSO */}
-        <div className="mt-6">
-          <div className="relative my-4 text-center">
-            <span className="relative z-10 bg-dark-card px-2 text-xs text-dark-muted">
-              或
-            </span>
-            <div className="absolute inset-0 top-1/2 h-px -translate-y-1/2 bg-dark-border" />
-          </div>
-          <button
-            type="button"
-            onClick={() => { window.location.href = '/api/auth/feishu/login' }}
-            className="w-full rounded-lg border border-dark-border bg-dark-bg py-2.5 text-sm font-medium text-dark-text hover:bg-dark-border/30"
-          >
-            飞书登录
-          </button>
-        </div>
-
         {/* Toggle */}
         <p className="mt-6 text-center text-sm text-dark-muted">
           {mode === 'login' ? (

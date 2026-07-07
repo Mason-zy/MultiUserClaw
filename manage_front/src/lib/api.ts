@@ -112,11 +112,8 @@ export async function syncContainerStatus(userId: string): Promise<{ status: str
 }
 
 // Usage
-export async function getUsageSummary(userId?: string): Promise<UsageSummary> {
-  const params = new URLSearchParams();
-  if (userId) params.set("user_id", userId);
-  const qs = params.toString();
-  return request<UsageSummary>(`/api/admin/usage/summary${qs ? `?${qs}` : ""}`);
+export async function getUsageSummary(): Promise<UsageSummary> {
+  return request<UsageSummary>("/api/admin/usage/summary");
 }
 
 export async function getUsageHistory(days = 30, userId?: string): Promise<UsageHistory> {

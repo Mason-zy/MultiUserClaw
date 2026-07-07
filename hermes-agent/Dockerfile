@@ -228,13 +228,9 @@ RUN mkdir -p /opt/hermes/bin && \
     cp /opt/hermes/docker/hermes-exec-shim.sh /opt/hermes/bin/hermes && \
     chmod 0755 /opt/hermes/bin/hermes && \
     printf 'docker\n' > /opt/hermes/.install_method && \
-    # LOCAL: 沿用 main 的部分可写 seal —— 不 chown root、不加 a-w。bridge 的 npm run build
-    # 要写 web/node_modules/.tmp、hermes_cli/web_dist 等（见 .claude/memory.md 第40节），
-    # 全树 a-w 会让 bridge build EACCES；而 chown -R root:root 全树在 overlay2 上还要再熬
-    # 一次遍历。这里只 a+rX 保读+遍历，并把 .venv/ui-tui/node_modules 归 hermes（运行时
-    # lazy_deps/_tui_need_npm_install 要写）。web 源码已由上方 COPY --chown hermes 可写。
+    chown -R root:root /opt/hermes && \
     chmod -R a+rX /opt/hermes && \
-    chown -R hermes:hermes /opt/hermes/.venv /opt/hermes/ui-tui /opt/hermes/node_modules
+    chmod -R a-w /opt/hermes
 # The ``.install_method`` stamp is baked next to the running code (the install
 # tree), NOT into $HERMES_HOME. $HERMES_HOME (/opt/data) is a shared data
 # volume that is commonly bind-mounted from the host and even shared with a
